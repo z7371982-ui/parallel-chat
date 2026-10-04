@@ -1,5 +1,6 @@
 import { extension_settings } from '../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../script.js';
+import { installScrollQrCompatibility } from './qr-compat.js';
 
 const KEY = 'parallel_tavern';
 const CONTROLLER = '__PARALLEL_TAVERN_V2__';
@@ -19,6 +20,7 @@ async function initialize() {
     const settings = extension_settings[KEY] ||= {};
     if (typeof settings.showLauncher !== 'boolean') settings.showLauncher = true;
     window.__PT_EXTENSION_CONFIG__ = settings;
+    window.__PT_INSTALL_SCROLL_QR_COMPAT__ = installScrollQrCompatibility;
 
     const root = document.createElement('div');
     root.id = 'pt-extension-settings';
@@ -26,7 +28,7 @@ async function initialize() {
     root.innerHTML = `
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>并行对话 · 0.4.1</b>
+                <b>并行对话 · 0.4.3</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">

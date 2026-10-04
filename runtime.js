@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.4.1 — Tavern Helper global script.
+/* Parallel Tavern 0.4.3 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.4.1 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.4.3 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,7 +110,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.4.1';
+    const VERSION = '0.4.3';
     const MAX_SESSIONS = 3;
     const sessions = new Map();
     const teardown = [];
@@ -498,6 +498,50 @@
         renderPending = true;
         host.setTimeout(() => { renderPending = false; if (!disposed) { if (pointerActive) queueRender(); else render(); } }, 160);
     }
+    function chatScroller(w) {
+        const d = w.document;
+        let node = d.querySelector('#chat .mes[mesid], .mes[mesid]')?.parentElement;
+        while (node && node !== d.body) {
+            if (node.clientHeight > 0 && node.scrollHeight > node.clientHeight && /auto|scroll/.test(w.getComputedStyle(node).overflowY)) return node;
+            node = node.parentElement;
+        }
+        return d.querySelector('#chat, #dialogue, .chat-container, #chat_story_container, .list-messages, .chatdisplay') || d.scrollingElement;
+    }
+    function rememberReading(session) {
+        if (!session?.win || !session.ready) return;
+        try {
+            const w = session.win, el = chatScroller(w);
+            if (!el) return;
+            const top = el === w.document.scrollingElement ? 0 : el.getBoundingClientRect().top + el.clientTop;
+            const anchor = [...el.querySelectorAll('.mes[mesid]')].find(n => n.getBoundingClientRect().bottom > top && n.getBoundingClientRect().height > 0);
+            session.reading = { chatId: ctx(w).chatId || ctx(w).getCurrentChatId?.(),
+                scrollTop: el.scrollTop, bottom: el.scrollHeight - el.clientHeight - el.scrollTop < 8,
+                mesid: anchor?.getAttribute('mesid'), offset: anchor ? anchor.getBoundingClientRect().top - top : 0 };
+        } catch {}
+    }
+    function restoreReading(session) {
+        cancelReadingRestore();
+        const saved = session?.reading, w = session?.win;
+        if (!saved || !w) return;
+        let cancelled = false;
+        const cancel = () => { cancelled = true; };
+        const inputs = ['wheel', 'touchstart', 'pointerdown', 'keydown'];
+        for (const name of inputs) w.addEventListener(name, cancel, { capture: true, passive: true });
+        const apply = () => {
+            if (cancelled || disposed || activeId !== session.id || (ctx(w).chatId || ctx(w).getCurrentChatId?.()) !== saved.chatId) return;
+            const el = chatScroller(w); if (!el) return;
+            const anchor = [...el.querySelectorAll('.mes[mesid]')].find(n => n.getAttribute('mesid') === saved.mesid);
+            const top = el === w.document.scrollingElement ? 0 : el.getBoundingClientRect().top + el.clientTop;
+            const value = saved.bottom ? el.scrollHeight - el.clientHeight : anchor ? el.scrollTop + anchor.getBoundingClientRect().top - top - saved.offset : saved.scrollTop;
+            el.scrollTo({ top: value, behavior: 'instant' });
+        };
+        const raf = host.requestAnimationFrame(() => { apply(); });
+        const timer = host.setTimeout(() => { apply(); cleanup(); }, 180);
+        const cleanup = () => { cancel(); host.cancelAnimationFrame(raf); host.clearTimeout(timer); for (const name of inputs) w.removeEventListener(name, cancel, true); };
+        cancelReadingRestore = cleanup;
+    }
+    let cancelReadingRestore = () => {};
+    teardown.push(() => cancelReadingRestore());
     function setActive(id) {
         lastAction = { action: 'view-session', session: id, time: new Date().toISOString() };
         if (!sessions.has(id)) return;
@@ -506,6 +550,8 @@
             notify(sessions.get(id).error || '这个角色还在加载，请稍等。');
             return;
         }
+        const switching = activeId !== id;
+        if (switching) { cancelReadingRestore(); rememberReading(sessions.get(activeId)); }
         activeId = id;
         sessions.get(id).unreadCompletion = false;
         layoutSessions();
@@ -518,6 +564,7 @@
             }
         }
         panelOpen = false; pickerOpen = false; render();
+        if (switching) restoreReading(sessions.get(id));
         // Do not move or remove frames: doing so can tear down their browsing context.
     }
     panel.addEventListener('cancel', e => { e.preventDefault(); panelOpen = false; pickerOpen = false; render(); });
@@ -705,6 +752,7 @@
         });
     }
     function attachSession(session) {
+        if (host.__PT_INSTALL_SCROLL_QR_COMPAT__) session.cleanups.push(host.__PT_INSTALL_SCROLL_QR_COMPAT__(session.win, () => sessions.get(activeId)?.win || host));
         const w = session.win, c = ctx(w), events = c.eventTypes || c.event_types;
         if (w !== host) session.cleanups.push(bindAudioGesture(w));
         on(c.eventSource, events.GENERATION_STARTED, (_type, _options, dryRun) => {
@@ -1134,6 +1182,7 @@
                 }
             });
         }, attachChild, reportChild, diagnostics, dispose,
+        getActiveWindow: () => sessions.get(activeId)?.win || host,
         setLauncherVisible: value => {
             launcherVisible = value !== false;
             if (!launcherVisible) { panelOpen = false; pickerOpen = false; }
