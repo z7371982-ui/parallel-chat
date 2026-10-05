@@ -110,13 +110,34 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.6';
+    const VERSION = '0.5.7';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
+    let hostAppVersion = null;
+    if (typeof host.__TAURI__?.app?.getVersion === 'function') {
+        Promise.resolve().then(() => host.__TAURI__.app.getVersion()).then(value => {
+            if (typeof value === 'string' && /^[\w.+-]{1,64}$/.test(value)) hostAppVersion = value;
+        }).catch(() => {});
+    }
     let previousPageStage = null;
     let currentPageStage = null;
+    const pageStages = [];
     try { previousPageStage = JSON.parse(host.sessionStorage.getItem('parallel-tavern.last-stage') || 'null'); } catch {}
     function recordPageStage(stage) {
-        currentPageStage = { version: VERSION, stage, time: Date.now(), sessions: sessions.size };
+        const entry = { stage, time: Date.now(), sessions: sessions.size };
+        pageStages.push(entry);
+        if (pageStages.length > 16) pageStages.shift();
+        currentPageStage = { ...currentPageStage, version: VERSION, ...entry, visibility: doc.visibilityState, recentStages: [...pageStages] };
+        if (stage === '副窗口就绪' || stage === '关闭副窗口') {
+            currentPageStage.resources = [...sessions.values()].map(session => {
+                try {
+                    const w = session.win, d = w?.document;
+                    return { main: session.id === 'main', ready: !!session.ready,
+                        iframes: d?.getElementsByTagName('iframe').length ?? null,
+                        images: d?.images.length ?? null, scripts: d?.scripts.length ?? null,
+                        nativeListeners: w?.__PT_BOOT_TRACE__?.bridgeEvents?.active ?? null };
+                } catch { return { main: session.id === 'main', accessible: false }; }
+            });
+        }
         try { host.sessionStorage.setItem('parallel-tavern.last-stage', JSON.stringify(currentPageStage)); } catch {}
     }
     const MAX_SESSIONS = 3;
@@ -173,6 +194,7 @@
     let menuOpen = false;
     let controlsId = null;
     let launcherSignature = '';
+    let badgeSignature = '';
     let appHTML = null;
     let renderPending = false;
     let pointerActive = false;
@@ -612,6 +634,7 @@
             return;
         }
         const switching = activeId !== id;
+        if (switching) recordPageStage(id === 'main' ? '切换到主窗口' : '切换到副窗口');
         if (switching) { sessions.get(activeId)?.profile?.flush(); void sessions.get(id).profile?.activate(); }
         if (switching) { cancelReadingRestore(); rememberReading(sessions.get(activeId)); }
         activeId = id;
@@ -647,11 +670,15 @@
             dock.append(faces, label);
             launcher.replaceChildren(dock);
         }
+        const nextBadgeSignature = JSON.stringify(completed.map(session => session.id));
+        if (badgeSignature !== nextBadgeSignature) {
+        badgeSignature = nextBadgeSignature;
         completionBadge.replaceChildren(...completed.map(session => {
             const badge = element('span', 'pt-avatar-badge', '1');
             badge.dataset.ptSession = session.id;
             return badge;
         }));
+        }
         completionBadge.hidden = completed.length === 0;
         setFloating(completionBadge, completed.length > 0); positionCompletionBadge();
         const label = completed.length ? `并行对话：${completed.map(s => s.title).join('、')} 已生成完成，待查看` : '并行对话';
@@ -851,10 +878,12 @@
         if (w !== host) session.cleanups.push(bindAudioGesture(w));
         on(c.eventSource, events.GENERATION_STARTED, (_type, _options, dryRun) => {
             if (dryRun) return;
+            recordPageStage(session.id === 'main' ? '主窗口开始生成' : '副窗口开始生成');
             session.unreadCompletion = false;
             session.busy = true; session.status = '生成中'; session.error = null; queueRender();
         }, session);
         on(c.eventSource, events.GENERATION_ENDED, () => {
+            recordPageStage(session.id === 'main' ? '主窗口生成结束' : '副窗口生成结束');
             const wasBusy = session.busy; session.busy = false; session.status = '生成已结束';
             if (wasBusy && enabled) completionSound();
             if (wasBusy && enabled && activeId !== session.id) session.unreadCompletion = true;
@@ -862,6 +891,7 @@
             if (wasBusy && enabled && activeId !== session.id) notify(`${session.title} 的生成已结束，可以切回查看。`);
         }, session);
         on(c.eventSource, events.GENERATION_STOPPED, () => {
+            recordPageStage(session.id === 'main' ? '主窗口停止生成' : '副窗口停止生成');
             // Native core can still be saving after STOPPED; isBusy also reads it.
             session.busy = false; session.status = '已停止'; queueRender();
         }, session);
@@ -904,6 +934,7 @@
         host.clearTimeout(session.timeout);
         for (const clean of session.cleanups) clean();
         session.frame?.remove(); sessions.delete(session.id);
+        recordPageStage('关闭副窗口');
         if (session.frame) sessionSizer?.unobserve(session.frame);
         if (activeId === session.id) setActive('main');
         render();
@@ -1046,6 +1077,47 @@
                     return localizeBinary(await core.invoke(...args));
                 }, configurable: true });
                 Object.defineProperty(childApi, 'core', { value: childCore, configurable: true });
+                // The inherited public event API registers callbacks in the
+                // parent realm. Removing an iframe alone does not release them.
+                const eventApi = api.event;
+                if (typeof eventApi?.listen === 'function') {
+                    const stops = new Set();
+                    let closed = false;
+                    const events = trace.bridgeEvents = { active: 0, pending: 0, cleanupErrors: 0 };
+                    const release = fn => {
+                        try { return Promise.resolve(fn()).catch(() => { events.cleanupErrors++; }); }
+                        catch { events.cleanupErrors++; return Promise.resolve(); }
+                    };
+                    const subscribe = async (event, handler, options, once = false) => {
+                        if (closed) throw new Error('Parallel session already closed');
+                        let off = null, stopped = false;
+                        const stop = () => {
+                            if (stopped) return;
+                            stopped = true; stops.delete(stop); events.active = stops.size;
+                            if (off) return release(off);
+                        };
+                        events.pending++;
+                        try {
+                            off = await eventApi.listen(event, value => {
+                                if (closed || stopped) return;
+                                if (once) void stop();
+                                handler(value);
+                            }, options);
+                            if (closed || stopped) { stopped = true; await release(off); }
+                            else { stops.add(stop); events.active = stops.size; }
+                            return stop;
+                        } finally { events.pending--; }
+                    };
+                    const childEvents = Object.create(eventApi);
+                    Object.defineProperty(childEvents, 'listen', { value: (event, handler, options) => subscribe(event, handler, options), configurable: true });
+                    Object.defineProperty(childEvents, 'once', { value: (event, handler, options) => subscribe(event, handler, options, true), configurable: true });
+                    Object.defineProperty(childApi, 'event', { value: childEvents, configurable: true });
+                    window.__PT_BRIDGE_DISPOSE__ = () => {
+                        closed = true;
+                        for (const stop of [...stops]) void stop();
+                    };
+                    window.addEventListener('pagehide', window.__PT_BRIDGE_DISPOSE__, { once: true });
+                }
                 window.__TAURI__ = childApi;
             } else window.__TAURI__ = api;
         }
@@ -1172,6 +1244,7 @@
             frame.dataset.ttMobileSurface = 'viewport-host'; frame.setAttribute('aria-hidden', 'true');
             s.frame = frame;
             s.cleanups.push(() => frame.contentWindow?.__PT_SETTINGS_DISPOSE__?.());
+            s.cleanups.push(() => frame.contentWindow?.__PT_BRIDGE_DISPOSE__?.());
             shell.append(frame);
             recordPageStage('初始化副窗口');
             layoutSessions(); sessionSizer?.observe(frame);
@@ -1193,7 +1266,7 @@
             recordPageStage('副窗口页面已写入');
             if (frame.dataset.ptBootWritten !== 'yes') throw new Error('宿主阻止了子会话启动脚本。并行面板可用，但此环境暂不能打开并行会话。');
             const watch = host.setInterval(() => {
-                if (s.ready || !sessions.has(id) || disposed) { host.clearInterval(watch); return; }
+                if (s.ready || s.error || !sessions.has(id) || disposed) { host.clearInterval(watch); return; }
                 try { attachChild(frame.contentWindow, id); revealStartupPopup(s); } catch {}
             }, 250);
             s.cleanups.push(() => host.clearInterval(watch));
@@ -1244,6 +1317,10 @@
             if (!c.eventSource?.on || !events || typeof c.selectCharacterById !== 'function') return false;
             s.win = w; s.phase = '已找到聊天上下文，等待 APP_READY';
             const ready = () => {
+                // APP_READY may be replayed by hosts/extensions. Reserve before
+                // scheduling so duplicate events cannot race character loading.
+                if (s.openStarted || s.ready || s.error || !sessions.has(id) || disposed) return;
+                s.openStarted = true;
                 s.appReadyReceived = true;
                 if (!s.error) s.status = '正在打开角色…';
                 // Keep request diagnostics running through target chat loading.
@@ -1289,7 +1366,7 @@
                         if (!sessions.has(id) || disposed) return;
                         identity(s); setActive(id);
                         recordPageStage('副窗口就绪');
-                    } catch (error) { host.clearTimeout(s.timeout); s.status = '加载失败'; s.error = shortError(error); s.phase = '目标聊天读取失败'; queueRender(); notify(s.error); }
+                    } catch (error) { host.clearTimeout(s.timeout); s.status = '加载失败'; s.error = shortError(error); s.phase = '目标聊天读取失败'; recordPageStage('目标聊天读取失败'); queueRender(); notify(s.error); }
                 }, 0);
             };
             on(c.eventSource, events.APP_INITIALIZED || 'app_initialized', () => { s.appInitializedReceived = true; s.phase = 'APP_INITIALIZED 已触发，等待启动收尾'; }, s);
@@ -1326,6 +1403,7 @@
                 input: w.__PT_INPUT_STATE__?.() || null,
                 boot: w.__PT_BOOT_TRACE__ ? { resourceErrors: w.__PT_BOOT_TRACE__.resourceErrors,
                     bridgeBytes: w.__PT_BOOT_TRACE__.bridgeBytes || null,
+                    bridgeEvents: w.__PT_BOOT_TRACE__.bridgeEvents || null,
                     chatProtection: w.__PT_BOOT_TRACE__.chatProtection || null,
                     inputCompat: w.__PT_BOOT_TRACE__.inputCompat || null,
                     inputAtDOMContentLoaded: w.__PT_BOOT_TRACE__.inputAtDOMContentLoaded || null,
@@ -1342,8 +1420,10 @@
             script: 'Parallel Tavern', version: VERSION,
             host: host.__TAURITAVERN__ || host.__TAURI_RUNNING__ ? 'TauriTavern' : 'SillyTavern / browser',
             platformABI: host.__TAURITAVERN__?.abiVersion ?? null,
+            hostAppVersion,
             startupTiming: { ...startupTiming },
-            iosFixedLayer: iosBrowser, previousPageStage,
+            iosFixedLayer: iosBrowser, previousPageStage, currentPageStage,
+            navigationType: host.performance?.getEntriesByType?.('navigation')?.[0]?.type || null,
             launcherVisible, enabled, appReady, activeSession: activeId, lastAction,
             sessions: [...sessions.values()].map(s => ({ id: s.id, ready: s.ready, busy: isBusy(s), generating: isGenerating(s), saving: isSaving(s), generationEventActive: !!s.busy, nativeGenerating: s.win?.__PT_CORE__?.is_send_press === true, status: s.status, error: s.error || null, hasCore: !!s.win?.__PT_CORE__, needsConfirmation: !!s.needsConfirmation, attached: !!s.attached, appInitializedReceived: !!s.appInitializedReceived, appReadyReceived: !!s.appReadyReceived, phase: s.phase || null, lastErrorPhase: s.lastErrorPhase || null, sourceInput: s.sourceInput || null, issues: s.issues || [], child: childState(s) })),
             // Deliberately exclude prompts, messages, names, URLs and credentials.
@@ -1426,7 +1506,20 @@
         if ([...sessions.values()].some(isBusy)) { event.preventDefault(); event.returnValue = ''; }
     };
     host.addEventListener('beforeunload', unload);
-    const leaving = () => { try { host.sessionStorage.setItem('parallel-tavern.last-stage', JSON.stringify({ ...currentPageStage, pageExitObserved: true })); } catch {} };
+    const visibilityChanged = () => recordPageStage(doc.visibilityState === 'hidden' ? '页面转入后台' : '页面回到前台');
+    doc.addEventListener('visibilitychange', visibilityChanged);
+    teardown.push(() => doc.removeEventListener('visibilitychange', visibilityChanged));
+    const leaving = event => {
+        currentPageStage = { ...currentPageStage, pageExitObserved: true, pageExitTime: Date.now(), persisted: !!event.persisted };
+        try { host.sessionStorage.setItem('parallel-tavern.last-stage', JSON.stringify(currentPageStage)); } catch {}
+    };
+    const resumed = event => {
+        if (!event.persisted) return;
+        currentPageStage = { ...currentPageStage, pageExitObserved: false, pageExitTime: null, persisted: false };
+        recordPageStage('页面从缓存恢复');
+    };
+    host.addEventListener('pageshow', resumed);
+    teardown.push(() => host.removeEventListener('pageshow', resumed));
     host.addEventListener('pagehide', leaving, true);
     teardown.push(() => host.removeEventListener('pagehide', leaving, true));
     teardown.push(() => host.removeEventListener('beforeunload', unload));
