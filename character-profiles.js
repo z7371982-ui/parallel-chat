@@ -70,6 +70,11 @@ export function installCharacterProfiles(win, { settings, save, busy, notify }) 
         const id = avatar();
         if (!id) { observedAvatar = null; return; }
         const value = Object.hasOwn(settings.characterProfiles || {}, id) ? settings.characterProfiles[id] : null;
+        const existing = read();
+        if (value && existing && ['api', 'source', 'preset', 'model'].every(key => value[key] === existing[key])) {
+            observedAvatar = id; observed = signature(existing); pendingEdit = false;
+            return;
+        }
         applying = true;
         try {
             if (value && ['openai', 'textgenerationwebui'].includes(value.api)) {
@@ -101,7 +106,7 @@ export function installCharacterProfiles(win, { settings, save, busy, notify }) 
                 // Re-derive the control, rather than trusting a stored selector.
                 const current = read();
                 if (!current || current.api !== value.api || current.source !== value.source) throw new Error('保存的模型类型当前不受支持');
-                setControl(current.control, value.model, true);
+                if (current.model !== value.model) setControl(current.control, value.model, true);
                 if (read()?.model !== value.model) throw new Error('宿主未接受保存的模型选择');
             }
         } catch (error) {

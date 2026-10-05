@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.5.2 — Tavern Helper global script.
+/* Parallel Tavern 0.5.4 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.5.2 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.5.4 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,9 +110,18 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.2';
+    const VERSION = '0.5.4';
+    const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
+    let previousPageStage = null;
+    let currentPageStage = null;
+    try { previousPageStage = JSON.parse(host.sessionStorage.getItem('parallel-tavern.last-stage') || 'null'); } catch {}
+    function recordPageStage(stage) {
+        currentPageStage = { version: VERSION, stage, time: Date.now(), sessions: sessions.size };
+        try { host.sessionStorage.setItem('parallel-tavern.last-stage', JSON.stringify(currentPageStage)); } catch {}
+    }
     const MAX_SESSIONS = 3;
     const sessions = new Map();
+    recordPageStage('启动扩展');
     const recentChatTimes = new Map();
     const teardown = [];
     const soundKey = 'parallel-tavern.completion-sound';
@@ -304,6 +313,7 @@
     doc.head.append(style);
     const shell = element('div'); shell.id = 'pt-shell'; shell.dataset.ttMobileSurface = 'none';
     const launcher = button('并行', event => {
+        recordPageStage('点击悬浮入口');
         if (enabled && host.__PT_EXTENSION_CONFIG__?.avatarQuickSwitch === true && event.detail > 0) {
             // Pointer capture for dragging retargets clicks to the launcher.
             // Hit-test visible avatars; reverse order respects overlapping faces.
@@ -390,6 +400,7 @@
     });
     layoutSessions();
     function setFloating(node, visible) {
+        if (iosBrowser) node.dataset.ptFixedFallback = 'true';
         if ((node === launcher || node === completionBadge) && !launcherVisible) {
             try { if (node.matches(':popover-open')) node.hidePopover(); } catch {}
             node.hidden = true; node.style.setProperty('display', 'none', 'important'); return;
@@ -509,9 +520,20 @@
             session.chatId = c.chatId || c.getCurrentChatId?.() || null;
         } catch { /* document may still be loading */ }
     }
+    function isGenerating(session) {
+        try { return !!(session.busy || session.win.__PT_CORE__?.is_send_press === true); }
+        catch { return !!session.busy; }
+    }
+    function isSaving(session) {
+        try { return session.win.__PT_CORE__?.isChatSaving === true; }
+        catch { return false; }
+    }
+    function activityLabel(session) {
+        return isGenerating(session) ? '正在回复…' : isSaving(session) ? '正在保存…' : session.status;
+    }
     function isBusy(session) {
         try {
-            return !!(session.busy || session.win.__PT_CORE__?.is_send_press || session.win.__PT_CORE__?.isChatSaving);
+            return isGenerating(session) || isSaving(session);
         } catch { return session.busy; }
     }
     function preview(session) {
@@ -606,7 +628,7 @@
     panel.addEventListener('cancel', e => { e.preventDefault(); panelOpen = false; pickerOpen = false; render(); });
     function updateLauncher() {
         const all = [...sessions.values()];
-        const running = all.filter(isBusy).length;
+        const running = all.filter(isGenerating).length;
         const completed = enabled ? all.filter(s => s.unreadCompletion) : [];
         launcher.dataset.completed = String(completed.length);
         const signature = JSON.stringify([enabled, running, completed.length, all.map(s => [s.title, s.avatar])]);
@@ -676,14 +698,14 @@
             return;
         }
         const overview = element('div', 'pt-overview');
-        overview.append(element('span', 'pt-live-count', `${[...sessions.values()].filter(isBusy).length} 正在回复`), element('span', 'pt-ready-count', `${[...sessions.values()].filter(s => s.unreadCompletion).length} 待查看`));
+        overview.append(element('span', 'pt-live-count', `${[...sessions.values()].filter(isGenerating).length} 正在回复`), element('span', 'pt-ready-count', `${[...sessions.values()].filter(s => s.unreadCompletion).length} 待查看`));
         panel.append(overview);
         const section = element('div', 'pt-section-label', '对话'); section.append(element('span', '', `${sessions.size} / ${MAX_SESSIONS}`)); panel.append(section);
         const list = element('div', 'pt-session-list'); panel.append(list);
         for (const session of sessions.values()) {
             const card = element('div', `pt-card${activeId === session.id ? ' pt-active' : ''}`);
             card.dataset.session = session.id;
-            card.dataset.busy = String(isBusy(session)); card.dataset.unread = String(!!session.unreadCompletion);
+            card.dataset.busy = String(isGenerating(session)); card.dataset.unread = String(!!session.unreadCompletion);
             const sessionRow = element('div', 'pt-session-row');
             const open = button('', () => setActive(session.id), '查看此会话'); open.classList.add('pt-session-open');
             const copy = element('span', 'pt-session-copy');
@@ -691,14 +713,14 @@
             title.append(element('span', 'pt-name', session.title));
             if (activeId === session.id) title.append(element('span', 'pt-current', '当前'));
             else if (session.unreadCompletion) title.append(element('span', 'pt-completed', '新回复'));
-            copy.append(title, element('span', 'pt-chat-name', session.chatId || session.targetChat || '最近聊天'), element('span', 'pt-preview', preview(session).replace(/\s+/g, ' ') || '点击进入对话'), element('span', 'pt-status', `${session.id === 'main' ? '主页面 · ' : ''}${isBusy(session) ? '正在回复…' : session.status}`));
+            copy.append(title, element('span', 'pt-chat-name', session.chatId || session.targetChat || '最近聊天'), element('span', 'pt-preview', preview(session).replace(/\s+/g, ' ') || '点击进入对话'), element('span', 'pt-status', `${session.id === 'main' ? '主页面 · ' : ''}${activityLabel(session)}`));
             open.append(portrait(session), copy); sessionRow.append(open);
             const more = iconButton('会话操作', 'more', () => { controlsId = controlsId === session.id ? null : session.id; render(); });
             more.setAttribute('aria-expanded', String(controlsId === session.id)); sessionRow.append(more); card.append(sessionRow);
             if (session.error) card.append(element('p', 'pt-error', session.error));
             if (controlsId === session.id) {
                 const controls = element('div', 'pt-actions');
-                if (isBusy(session)) controls.append(button('停止生成', () => stopSession(session)));
+                if (isGenerating(session)) controls.append(button('停止生成', () => stopSession(session)));
                 if (session.id !== 'main') {
                     const close = button('关闭窗口', () => closeSession(session));
                     close.disabled = isBusy(session); controls.append(close);
@@ -734,15 +756,16 @@
             const session = sessions.get(card.dataset.session);
             if (!session) continue;
             const status = card.querySelector('.pt-status');
-            const next = `${session.id === 'main' ? '主页面 · ' : ''}${isBusy(session) ? '正在回复…' : session.status}`;
+            const next = `${session.id === 'main' ? '主页面 · ' : ''}${activityLabel(session)}`;
             if (status && status.textContent !== next) status.textContent = next;
-            card.dataset.busy = String(isBusy(session));
+            card.dataset.busy = String(isGenerating(session));
             const snippet = card.querySelector('.pt-preview'), text = preview(session).replace(/\s+/g, ' ') || '点击进入对话';
             if (snippet && snippet.textContent !== text) snippet.textContent = text;
         }
-        const live = panel.querySelector('.pt-live-count'); if (live) live.textContent = `${[...sessions.values()].filter(isBusy).length} 正在回复`;
+        const live = panel.querySelector('.pt-live-count'); if (live) live.textContent = `${[...sessions.values()].filter(isGenerating).length} 正在回复`;
     }
     function showPicker() {
+        recordPageStage('打开角色搜索');
         if (!enabled) return;
         pickerOpen = true; panelOpen = true;
         picker.replaceChildren();
@@ -899,10 +922,17 @@
 
     // This prelude executes BEFORE native scripts in each child document. It uses the
     // existing TT bridge, retains native stream parsing, and isolates settings.
-    function childPrelude(id, avatar, baseURL) {
+    function childPrelude(id, avatar, baseURL, protectExisting) {
         const parentHost = window.parent;
         window.__PT_CHILD_ID__ = id;
         const trace = window.__PT_BOOT_TRACE__ = { requests: [], resourceErrors: {} };
+        trace.chatProtection = { existingHistory: !!protectExisting, blockedWrites: 0, verified: false };
+        window.__PT_CHAT_WRITE_READY__ = !protectExisting;
+        const guardChatWrite = () => {
+            if (window.__PT_CHAT_WRITE_READY__) return;
+            trace.chatProtection.blockedWrites++;
+            throw new Error('历史聊天尚未验证，已阻止副窗口写入。请关闭此副窗口后重试，不要在空白对话中继续生成。');
+        };
         // TT's focus keeper uses instanceof. Host iframe integrations can expose
         // constructors from another realm, or adopt real elements from one.
         // Keep this child realm's constructor and use the native DOM getter as
@@ -1004,7 +1034,10 @@
             const api = parentHost.__TAURI__, core = api.core;
             if (typeof core?.invoke === 'function') {
                 const childApi = Object.create(api), childCore = Object.create(core);
-                Object.defineProperty(childCore, 'invoke', { value: async (...args) => localizeBinary(await core.invoke(...args)), configurable: true });
+                Object.defineProperty(childCore, 'invoke', { value: async (...args) => {
+                    if (/^(?:(?:begin|append|finish)_chat_commit|(?:save|write|append|truncate|delete|rename|commit)_(?:character_|group_)?chat(?:_|$))/.test(args[0])) guardChatWrite();
+                    return localizeBinary(await core.invoke(...args));
+                }, configurable: true });
                 Object.defineProperty(childApi, 'core', { value: childCore, configurable: true });
                 window.__TAURI__ = childApi;
             } else window.__TAURI__ = api;
@@ -1013,9 +1046,15 @@
         const originalFetch = window.fetch.bind(window);
         const isTT = !!parentHost.__TAURITAVERN__ || !!parentHost.__TAURI_RUNNING__;
         let localRevision = null;
+        // A host extension may wrap our fetch then assign it back. Mark the
+        // options (not HTTP headers) so nested wrappers parse settings only once.
+        const fetchPass = Symbol('parallel-tavern-fetch-pass');
         const wrapFetch = next => async (input, init = {}) => {
+            if (init?.[fetchPass]) return next(input, init);
+            init = { ...init, [fetchPass]: true };
             const url = new URL(typeof input === 'string' || input instanceof URL ? String(input) : input.url, baseURL);
             const method = String(init.method || input?.method || 'GET').toUpperCase();
+            if (url.origin === new URL(baseURL).origin && method !== 'GET' && /\/api\/chats\/(save|save-metadata|rename|delete)$/.test(url.pathname)) guardChatWrite();
             if (url.origin === new URL(baseURL).origin && url.pathname.endsWith('/csrf-token')) {
                 const headers = parentHost.SillyTavern?.getContext()?.getRequestHeaders?.();
                 const token = headers && new Headers(headers).get('x-csrf-token');
@@ -1042,7 +1081,9 @@
                 else if (payload.tauritavern_settings_revision) localRevision = payload.tauritavern_settings_revision;
                 if (typeof payload.settings === 'string') {
                     const settings = JSON.parse(payload.settings);
-                    settings.active_character = avatar; settings.active_group = null;
+                    // Open the verified target explicitly after APP_READY, rather
+                    // than letting startup silently load/create a stale chat.
+                    settings.active_character = null; settings.active_group = null;
                     payload.settings = JSON.stringify(settings);
                     return new Response(JSON.stringify(payload), { status: response.status, headers: { 'Content-Type': 'application/json' } });
                 }
@@ -1072,12 +1113,38 @@
             panelOpen = true; pickerOpen = false; render();
             return notify('最多保留 3 个会话。请先关闭一个已结束的子会话，再打开其他角色。');
         }
+        if ([...sessions.values()].some(s => s.id !== 'main' && !s.ready && !s.error)) return notify('有一个副窗口正在加载，请等它就绪后再添加。');
         const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, cleanups: [] };
         // Reserve before awaiting, so fast double clicks cannot create duplicates.
         sessions.set(id, s); panelOpen = true; pickerOpen = false; render();
+        recordPageStage('开始打开副窗口');
         try {
+            s.phase = '确认已有聊天记录';
+            const historyResponse = await host.fetch(new URL('api/characters/chats', host.location.href).href, {
+                method: 'POST', headers: ctx(host).getRequestHeaders(), body: JSON.stringify({ avatar_url: avatar, ch_name: character.name }),
+            });
+            if (!historyResponse.ok) throw new Error('无法确认历史聊天，已停止打开副窗口，以免误建新档。');
+            const history = await historyResponse.json();
+            if (!history || typeof history !== 'object' || history.error) throw new Error('聊天列表返回异常，已停止打开副窗口。');
+            const chats = Object.values(history).filter(c => c && typeof c.file_name === 'string');
+            if (Object.values(history).length !== chats.length) throw new Error('无法识别聊天列表，已停止打开，未创建新档。');
+            const fileName = c => c.file_name.replace(/\.jsonl$/i, '');
+            if (targetChat && !chats.some(c => fileName(c) === targetChat)) throw new Error('指定聊天已不在历史列表中，已停止打开，未创建新档。');
+            const historyTime = chat => {
+                const raw = String(chat.last_mes || '');
+                const match = raw.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/)
+                    || chat.file_name.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/);
+                return chatTimestamp(chat.last_mes) || (match ? Date.parse(`${match[1]}T${match[2]}:${match[3]}:${match[4]}`) : 0) || 0;
+            };
+            const latest = [...chats].sort((a, b) => historyTime(b) - historyTime(a));
+            const chosen = targetChat ? chats.find(c => fileName(c) === targetChat)
+                : latest[0];
+            s.targetChat = chosen ? fileName(chosen) : null;
+            s.existingHistory = !!chosen;
+            s.expectedMessages = Number(chosen?.chat_items) || 0;
             s.phase = '读取宿主 HTML';
+            recordPageStage('读取副窗口页面');
             const html = await loadHTML();
             s.phase = 'HTML 已读取，准备子页面';
             if (!sessions.has(id) || disposed) return;
@@ -1091,13 +1158,14 @@
             parsed.querySelectorAll('base').forEach(n => n.remove());
             const base = parsed.createElement('base'); base.href = host.location.href;
             const bootstrap = parsed.createElement('script');
-            bootstrap.textContent = `(${childPrelude.toString()})(${JSON.stringify(id)},${JSON.stringify(avatar)},${JSON.stringify(host.location.href)});`.replace(/<\/script/gi, '<\\/script');
+            bootstrap.textContent = `(${childPrelude.toString()})(${JSON.stringify(id)},${JSON.stringify(avatar)},${JSON.stringify(host.location.href)},${s.existingHistory});`.replace(/<\/script/gi, '<\\/script');
             parsed.head.prepend(bootstrap); parsed.head.prepend(base);
             const frame = element('iframe', 'pt-frame pt-hidden'); frame.title = `并行角色：${character.name}`;
             frame.name = `pt-${id}`; frame.id = `pt-frame-${id}`;
             frame.dataset.ttMobileSurface = 'viewport-host'; frame.setAttribute('aria-hidden', 'true');
             s.frame = frame;
             shell.append(frame);
+            recordPageStage('初始化副窗口');
             layoutSessions(); sessionSizer?.observe(frame);
             // Unlike srcdoc, document.open() from the host realm gives this
             // document the actual app URL. TT and ST use location.origin/href.
@@ -1114,6 +1182,7 @@
                 f.dataset.ptBootWritten = 'yes';
             }`;
             doc.head.append(writer); writer.remove();
+            recordPageStage('副窗口页面已写入');
             if (frame.dataset.ptBootWritten !== 'yes') throw new Error('宿主阻止了子会话启动脚本。并行面板可用，但此环境暂不能打开并行会话。');
             const watch = host.setInterval(() => {
                 if (s.ready || !sessions.has(id) || disposed) { host.clearInterval(watch); return; }
@@ -1122,6 +1191,7 @@
             s.cleanups.push(() => host.clearInterval(watch));
             armLoadWarning(s);
         } catch (error) {
+            recordPageStage('副窗口加载失败');
             s.status = '加载失败'; s.error = shortError(error); queueRender(); notify(s.error);
         }
     }
@@ -1178,6 +1248,9 @@
                         if (typeof latest.selectCharacterById !== 'function') throw new Error('当前版本缺少 selectCharacterById 接口');
                         const index = latest.characters.findIndex(c => c?.avatar === s.targetAvatar);
                         if (index < 0) throw new Error('子会话未找到目标角色');
+                        // Older hosts ignore the chatFile option and read this
+                        // field before loading the character's full card.
+                        if (s.targetChat) latest.characters[index].chat = s.targetChat;
                         await latest.selectCharacterById(index, s.targetChat ? { chatFile: s.targetChat } : {});
                         const loaded = ctx(w);
                         if (loaded.characters[loaded.characterId]?.avatar !== s.targetAvatar) throw new Error('目标角色未成功打开，已保留原会话');
@@ -1191,6 +1264,15 @@
                             if ((verified.chatId || verified.getCurrentChatId?.()) !== s.targetChat) throw new Error('目标聊天记录未成功打开，请重试');
                         }
                         if (!sessions.has(id) || disposed) return;
+                        if (s.existingHistory) {
+                            const verified = ctx(w);
+                            if (w.__PT_BOOT_TRACE__?.chatProtection?.blockedWrites) throw new Error('加载期间出现了写入历史记录的尝试，已拦截并停止副窗口。请复制诊断。');
+                            if (!Array.isArray(verified.chat) || verified.chat.length === 0 || (s.expectedMessages > 2 && verified.chat.length < 2)) {
+                                throw new Error('已有聊天未完整载入，已保持写入保护，未允许空白对话覆盖历史。请复制诊断。');
+                            }
+                        }
+                        w.__PT_CHAT_WRITE_READY__ = true;
+                        if (w.__PT_BOOT_TRACE__?.chatProtection) w.__PT_BOOT_TRACE__.chatProtection.verified = true;
                         w.__PT_BOOT_DONE__ = true;
                         s.needsConfirmation = false; s.lastStartupPopup = null;
                         s.ready = true; s.phase = '就绪'; s.status = '待命'; s.error = null;
@@ -1198,6 +1280,7 @@
                         await s.profile?.ready;
                         if (!sessions.has(id) || disposed) return;
                         identity(s); setActive(id);
+                        recordPageStage('副窗口就绪');
                     } catch (error) { host.clearTimeout(s.timeout); s.status = '加载失败'; s.error = shortError(error); s.phase = '目标聊天读取失败'; queueRender(); notify(s.error); }
                 }, 0);
             };
@@ -1235,6 +1318,7 @@
                 input: w.__PT_INPUT_STATE__?.() || null,
                 boot: w.__PT_BOOT_TRACE__ ? { resourceErrors: w.__PT_BOOT_TRACE__.resourceErrors,
                     bridgeBytes: w.__PT_BOOT_TRACE__.bridgeBytes || null,
+                    chatProtection: w.__PT_BOOT_TRACE__.chatProtection || null,
                     inputCompat: w.__PT_BOOT_TRACE__.inputCompat || null,
                     inputAtDOMContentLoaded: w.__PT_BOOT_TRACE__.inputAtDOMContentLoaded || null,
                     inputAtError: w.__PT_BOOT_TRACE__.inputAtError || null,
@@ -1251,8 +1335,9 @@
             host: host.__TAURITAVERN__ || host.__TAURI_RUNNING__ ? 'TauriTavern' : 'SillyTavern / browser',
             platformABI: host.__TAURITAVERN__?.abiVersion ?? null,
             startupTiming: { ...startupTiming },
+            iosFixedLayer: iosBrowser, previousPageStage,
             launcherVisible, enabled, appReady, activeSession: activeId, lastAction,
-            sessions: [...sessions.values()].map(s => ({ id: s.id, ready: s.ready, busy: isBusy(s), status: s.status, error: s.error || null, hasCore: !!s.win?.__PT_CORE__, needsConfirmation: !!s.needsConfirmation, attached: !!s.attached, appInitializedReceived: !!s.appInitializedReceived, appReadyReceived: !!s.appReadyReceived, phase: s.phase || null, lastErrorPhase: s.lastErrorPhase || null, sourceInput: s.sourceInput || null, issues: s.issues || [], child: childState(s) })),
+            sessions: [...sessions.values()].map(s => ({ id: s.id, ready: s.ready, busy: isBusy(s), generating: isGenerating(s), saving: isSaving(s), generationEventActive: !!s.busy, nativeGenerating: s.win?.__PT_CORE__?.is_send_press === true, status: s.status, error: s.error || null, hasCore: !!s.win?.__PT_CORE__, needsConfirmation: !!s.needsConfirmation, attached: !!s.attached, appInitializedReceived: !!s.appInitializedReceived, appReadyReceived: !!s.appReadyReceived, phase: s.phase || null, lastErrorPhase: s.lastErrorPhase || null, sourceInput: s.sourceInput || null, issues: s.issues || [], child: childState(s) })),
             // Deliberately exclude prompts, messages, names, URLs and credentials.
             userAgent: host.navigator.userAgent,
         };
@@ -1292,6 +1377,7 @@
     host[KEY] = {
         version: VERSION, owner, claim: token => { host[KEY].owner = token; disposeRequested = false; },
         show: () => {
+            recordPageStage('打开悬浮面板');
             // QR is also a recovery entrance for stale/offscreen mobile coordinates.
             for (const node of [launcher, panel]) {
                 delete node.dataset.ptDragged;
@@ -1325,13 +1411,16 @@
     on(ctx(host).eventSource, events.APP_READY || 'app_ready', () => { appReady = true; queueRender(); }, main);
     const refresh = host.setInterval(() => {
         if (disposeRequested && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { dispose(); return; }
-        if (panelOpen || [...sessions.values()].some(s => s.busy)) refreshLiveStatus();
+        refreshLiveStatus();
     }, 1000);
     teardown.push(() => host.clearInterval(refresh));
     const unload = event => {
         if ([...sessions.values()].some(isBusy)) { event.preventDefault(); event.returnValue = ''; }
     };
     host.addEventListener('beforeunload', unload);
+    const leaving = () => { try { host.sessionStorage.setItem('parallel-tavern.last-stage', JSON.stringify({ ...currentPageStage, pageExitObserved: true })); } catch {} };
+    host.addEventListener('pagehide', leaving, true);
+    teardown.push(() => host.removeEventListener('pagehide', leaving, true));
     teardown.push(() => host.removeEventListener('beforeunload', unload));
     render();
     }
