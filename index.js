@@ -40,7 +40,7 @@ async function initialize() {
     root.innerHTML = `
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>并行对话 · 0.5.7</b>
+                <b>并行对话 · 0.5.10</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">

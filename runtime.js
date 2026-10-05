@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.5.6 — Tavern Helper global script.
+/* Parallel Tavern 0.5.10 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.5.6 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.5.10 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,9 +110,18 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.7';
+    const VERSION = '0.5.10';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let hostAppVersion = null;
+    let cleanupErrors = 0;
+    function runCleanups(callbacks) {
+        for (const clean of callbacks.splice(0)) {
+            try {
+                const result = clean();
+                if (result && typeof result.then === 'function') Promise.resolve(result).catch(() => { cleanupErrors++; });
+            } catch { cleanupErrors++; }
+        }
+    }
     if (typeof host.__TAURI__?.app?.getVersion === 'function') {
         Promise.resolve().then(() => host.__TAURI__.app.getVersion()).then(value => {
             if (typeof value === 'string' && /^[\w.+-]{1,64}$/.test(value)) hostAppVersion = value;
@@ -121,30 +130,71 @@
     let previousPageStage = null;
     let currentPageStage = null;
     const pageStages = [];
+    const mainErrors = { runtime: 0, unhandledRejection: 0 };
     try { previousPageStage = JSON.parse(host.sessionStorage.getItem('parallel-tavern.last-stage') || 'null'); } catch {}
     function recordPageStage(stage) {
         const entry = { stage, time: Date.now(), sessions: sessions.size };
         pageStages.push(entry);
         if (pageStages.length > 16) pageStages.shift();
-        currentPageStage = { ...currentPageStage, version: VERSION, ...entry, visibility: doc.visibilityState, recentStages: [...pageStages] };
-        if (stage === '副窗口就绪' || stage === '关闭副窗口') {
+        currentPageStage = { ...currentPageStage, version: VERSION, ...entry, visibility: doc.visibilityState, cleanupErrors, mainErrors: { ...mainErrors }, recentStages: [...pageStages] };
+        if (stage === '副窗口就绪' || stage === '关闭副窗口' || stage.startsWith('副窗口就绪后') || stage === '副窗口扩展加载完成' || stage === '副窗口执行错误' || stage === '主页面执行错误' || stage === '页面转入后台') {
             currentPageStage.resources = [...sessions.values()].map(session => {
                 try {
                     const w = session.win, d = w?.document;
                     return { main: session.id === 'main', ready: !!session.ready,
                         iframes: d?.getElementsByTagName('iframe').length ?? null,
                         images: d?.images.length ?? null, scripts: d?.scripts.length ?? null,
-                        nativeListeners: w?.__PT_BOOT_TRACE__?.bridgeEvents?.active ?? null };
+                        nativeListeners: w?.__PT_BOOT_TRACE__?.bridgeEvents?.active ?? null,
+                        extensionsLoaded: !!session.extensionsLoaded, errors: session.issues?.length || 0,
+                        loading: bootSnapshot(w),
+                        recentIssues: (session.issues || []).slice(-3),
+                        reducedCompositing: !!d?.getElementById('pt-ios-compositing') };
                 } catch { return { main: session.id === 'main', accessible: false }; }
             });
         }
         try { host.sessionStorage.setItem('parallel-tavern.last-stage', JSON.stringify(currentPageStage)); } catch {}
+    }
+    function bootSnapshot(w) {
+        const t = w?.__PT_BOOT_TRACE__;
+        if (!t) return null;
+        return { sampledAt: Date.now(), nativeCalls: t.nativeCalls ? JSON.parse(JSON.stringify(t.nativeCalls)) : null,
+            bridgeBytes: t.bridgeBytes ? { ...t.bridgeBytes } : null,
+            resourceErrors: { ...t.resourceErrors },
+            trackedPendingRequests: t.requests.filter(r => r.state === 'pending').length,
+            recentRequests: t.requests.slice(-12).map(r => ({ route: r.route, state: r.state, status: r.status ?? null,
+                elapsedMs: r.elapsedMs ?? Date.now() - r.started })),
+            mainThread: t.mainThread ? { ...t.mainThread } : null };
     }
     const MAX_SESSIONS = 3;
     const sessions = new Map();
     recordPageStage('启动扩展');
     const recentChatTimes = new Map();
     const teardown = [];
+    const mainError = e => { if (e.target === host) { mainErrors.runtime++; if (mainErrors.runtime <= 3) recordPageStage('主页面执行错误'); } };
+    const mainRejection = () => { mainErrors.unhandledRejection++; if (mainErrors.unhandledRejection <= 3) recordPageStage('主页面执行错误'); };
+    host.addEventListener('error', mainError, true);
+    host.addEventListener('unhandledrejection', mainRejection);
+    teardown.push(() => { host.removeEventListener('error', mainError, true); host.removeEventListener('unhandledrejection', mainRejection); });
+    // Restrict this reversible workaround to iOS documents owned by this controller.
+    // Do not hide/suspend the native chat: background streaming still needs its DOM.
+    const iosCompositingCSS = `html:root, html:root *, html:root *::before, html:root *::after, html:root ::backdrop {
+        -webkit-backdrop-filter: none !important; backdrop-filter: none !important;
+    }`;
+    let mainCompositingStyle = null;
+    function syncIOSCompositing() {
+        if (!iosBrowser) return;
+        if (sessions.size > 1) {
+            if (!mainCompositingStyle) {
+                mainCompositingStyle = doc.createElement('style');
+                mainCompositingStyle.id = 'pt-ios-compositing';
+                mainCompositingStyle.textContent = iosCompositingCSS;
+                doc.head.append(mainCompositingStyle);
+            }
+        } else {
+            mainCompositingStyle?.remove(); mainCompositingStyle = null;
+        }
+    }
+    teardown.push(() => { mainCompositingStyle?.remove(); mainCompositingStyle = null; });
     const soundKey = 'parallel-tavern.completion-sound';
     let nightMode = false;
     try { nightMode = host.localStorage.getItem('parallel-tavern.night-mode') === 'on'; } catch {}
@@ -932,8 +982,9 @@
             if (input?.value && !host.confirm('这个会话还有未发送的草稿。仍然关闭？')) return;
         }
         host.clearTimeout(session.timeout);
-        for (const clean of session.cleanups) clean();
+        runCleanups(session.cleanups);
         session.frame?.remove(); sessions.delete(session.id);
+        syncIOSCompositing();
         recordPageStage('关闭副窗口');
         if (session.frame) sessionSizer?.unobserve(session.frame);
         if (activeId === session.id) setActive('main');
@@ -1026,11 +1077,11 @@
         function errorDetails(error, file, line, column) {
             const message = String(error?.message || '');
             const kind = /content security|unsafe-eval|unsafe-inline/i.test(message) ? 'CSP' : /fetch|network|load.*module/i.test(message) ? 'RESOURCE_OR_NETWORK' : /not defined/.test(message) ? 'UNDEFINED_GLOBAL' : /Cannot read|Cannot set|undefined|null/.test(message) ? 'MISSING_VALUE' : /not a function/.test(message) ? 'MISSING_FUNCTION' : 'RUNTIME_ERROR';
-            const basename = value => { try { const part = new URL(value, baseURL).pathname.split('/').pop(); return /^[\w.-]+\.(?:m?js|html)$/.test(part) ? part : '(inline)'; } catch { return '(unknown)'; } };
+            const basename = value => { try { const part = new URL(value, baseURL).pathname.split('/').pop(); return /^[\w.-]+\.(?:m?js|html)$/.test(part) ? part.slice(0, 100) : '(inline)'; } catch { return '(unknown)'; } };
             const frames = [...String(error?.stack || '').matchAll(/((?:https?|tauri|asset):\/\/[^\s)]+?):(\d+):(\d+)/g)].slice(0, 5).map(m => ({ file: basename(m[1]), line: Number(m[2]), column: Number(m[3]) }));
             const inputFailure = message === 'Expected #send_textarea to exist';
             if (inputFailure) trace.inputAtError = inputState();
-            return { name: String(error?.name || 'Error').slice(0, 60), kind: inputFailure ? 'CHAT_INPUT_MISSING' : kind,
+            return { name: ['Error','TypeError','ReferenceError','SyntaxError','RangeError','URIError','EvalError','AggregateError'].includes(error?.name) ? error.name : 'Error', kind: inputFailure ? 'CHAT_INPUT_MISSING' : kind,
                 file: file ? basename(file) : null, line: Number(line) || null, column: Number(column) || null, frames };
         }
         report('子页面引导脚本已执行');
@@ -1050,7 +1101,27 @@
         };
         // Tauri does not consistently inject its JS API into same-origin frames.
         // Public Tauri functions keep their original callback registry in parent.
-        const bridgeBytes = trace.bridgeBytes = { arrayBuffers: 0, uint8Arrays: 0 };
+        const bridgeBytes = trace.bridgeBytes = { arrayBuffers: 0, uint8Arrays: 0, copiedBytes: 0, largestCopyBytes: 0 };
+        const copied = bytes => { bridgeBytes.copiedBytes += bytes; bridgeBytes.largestCopyBytes = Math.max(bridgeBytes.largestCopyBytes, bytes); };
+        const nativeCalls = trace.nativeCalls = { started: 0, pending: 0, peakPending: 0, failed: 0, recent: [] };
+        // Record categories only. Never retain command arguments, paths, URLs or payloads.
+        const commandCategory = command => /^(plugin:fs\||read_chat_bytes$|open_chat_backup_download$)/.test(command) ? 'file'
+            : command === 'plugin:resources|close' ? 'resource-close'
+            : /tokeniz/.test(command) ? 'tokenizer' : /settings/.test(command) ? 'settings'
+            : /chat/.test(command) ? 'chat' : /extension/.test(command) ? 'extension' : 'other';
+        trace.mainThread = { supported: false, longTasks: 0, longestMs: 0 };
+        let performanceObserver;
+        try {
+            if (window.PerformanceObserver?.supportedEntryTypes?.includes('longtask')) {
+                performanceObserver = new PerformanceObserver(list => {
+                    for (const entry of list.getEntries()) { trace.mainThread.longTasks++; trace.mainThread.longestMs = Math.max(trace.mainThread.longestMs, Math.round(entry.duration)); }
+                });
+                performanceObserver.observe({ entryTypes: ['longtask'] }); trace.mainThread.supported = true;
+            }
+        } catch {}
+        const diagnosticStopTimer = setTimeout(() => performanceObserver?.disconnect(), 90000);
+        window.__PT_DIAGNOSTICS_STOP__ = () => { performanceObserver?.disconnect(); clearTimeout(diagnosticStopTimer); };
+        window.addEventListener('pagehide', window.__PT_DIAGNOSTICS_STOP__, { once: true });
         function localizeBinary(value) {
             if (value instanceof ArrayBuffer || value instanceof Uint8Array) return value;
             // Keep IPC and callback ownership in the parent. Only the returned
@@ -1058,12 +1129,12 @@
             try {
                 Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get.call(value);
                 const copy = new Uint8Array(new Uint8Array(value));
-                bridgeBytes.arrayBuffers++;
+                bridgeBytes.arrayBuffers++; copied(copy.byteLength);
                 return copy.buffer;
             } catch {}
             if (ArrayBuffer.isView(value) && Object.prototype.toString.call(value) === '[object Uint8Array]') {
                 const copy = new Uint8Array(value);
-                bridgeBytes.uint8Arrays++;
+                bridgeBytes.uint8Arrays++; copied(copy.byteLength);
                 return copy;
             }
             return value;
@@ -1074,7 +1145,12 @@
                 const childApi = Object.create(api), childCore = Object.create(core);
                 Object.defineProperty(childCore, 'invoke', { value: async (...args) => {
                     if (/^(?:(?:begin|append|finish)_chat_commit|(?:save|write|append|truncate|delete|rename|commit)_(?:character_|group_)?chat(?:_|$))/.test(args[0])) guardChatWrite();
-                    return localizeBinary(await core.invoke(...args));
+                    const entry = { category: commandCategory(String(args[0])), state: 'pending', started: Date.now() };
+                    nativeCalls.started++; nativeCalls.pending++; nativeCalls.peakPending = Math.max(nativeCalls.peakPending, nativeCalls.pending);
+                    nativeCalls.recent.push(entry); if (nativeCalls.recent.length > 12) nativeCalls.recent.shift();
+                    try { const result = localizeBinary(await core.invoke(...args)); entry.state = 'resolved'; return result; }
+                    catch (error) { entry.state = 'rejected'; nativeCalls.failed++; throw error; }
+                    finally { nativeCalls.pending--; entry.elapsedMs = Date.now() - entry.started; }
                 }, configurable: true });
                 Object.defineProperty(childApi, 'core', { value: childCore, configurable: true });
                 // The inherited public event API registers callbacks in the
@@ -1145,7 +1221,7 @@
             // Only route names and status/timing are retained: never bodies, query
             // strings, headers, API addresses or user filenames.
             let request = null;
-            if (!window.__PT_BOOT_DONE__ && url.origin === new URL(baseURL).origin) {
+            if ((!window.__PT_BOOT_DONE__ || Date.now() < (window.__PT_DIAGNOSTIC_UNTIL__ || 0)) && url.origin === new URL(baseURL).origin) {
                 const match = url.pathname.match(/^\/api\/(settings|secrets|extensions|presets|characters|backgrounds|avatars|tokenizers|worldinfo|chats|users)\/([a-z-]+)$/);
                 const route = match ? `/api/${match[1]}/${match[2]}` : ['/version','/csrf-token'].includes(url.pathname) ? url.pathname : '(other local resource)';
                 if (route !== '(other local resource)' && trace.requests.length >= 80) { const i = trace.requests.findIndex(r => r.state !== 'pending'); if (i >= 0) trace.requests.splice(i, 1); }
@@ -1196,7 +1272,7 @@
         const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, cleanups: [] };
         // Reserve before awaiting, so fast double clicks cannot create duplicates.
-        sessions.set(id, s); panelOpen = true; pickerOpen = false; render();
+        sessions.set(id, s); syncIOSCompositing(); panelOpen = true; pickerOpen = false; render();
         recordPageStage('开始打开副窗口');
         try {
             s.phase = '确认已有聊天记录';
@@ -1239,12 +1315,19 @@
             const bootstrap = parsed.createElement('script');
             bootstrap.textContent = `(${childPrelude.toString()})(${JSON.stringify(id)},${JSON.stringify(avatar)},${JSON.stringify(host.location.href)},${s.existingHistory});`.replace(/<\/script/gi, '<\\/script');
             parsed.head.prepend(bootstrap); parsed.head.prepend(base);
+            if (iosBrowser) {
+                const reduced = parsed.createElement('style'); reduced.id = 'pt-ios-compositing';
+                reduced.textContent = iosCompositingCSS;
+                // Present before the first render; no repeated DOM/style polling.
+                parsed.head.append(reduced);
+            }
             const frame = element('iframe', 'pt-frame pt-hidden'); frame.title = `并行角色：${character.name}`;
             frame.name = `pt-${id}`; frame.id = `pt-frame-${id}`;
             frame.dataset.ttMobileSurface = 'viewport-host'; frame.setAttribute('aria-hidden', 'true');
             s.frame = frame;
             s.cleanups.push(() => frame.contentWindow?.__PT_SETTINGS_DISPOSE__?.());
             s.cleanups.push(() => frame.contentWindow?.__PT_BRIDGE_DISPOSE__?.());
+            s.cleanups.push(() => frame.contentWindow?.__PT_DIAGNOSTICS_STOP__?.());
             shell.append(frame);
             recordPageStage('初始化副窗口');
             layoutSessions(); sessionSizer?.observe(frame);
@@ -1359,6 +1442,7 @@
                         w.__PT_CHAT_WRITE_READY__ = true;
                         if (w.__PT_BOOT_TRACE__?.chatProtection) w.__PT_BOOT_TRACE__.chatProtection.verified = true;
                         w.__PT_BOOT_DONE__ = true;
+                        w.__PT_DIAGNOSTIC_UNTIL__ = Date.now() + 30000;
                         s.needsConfirmation = false; s.lastStartupPopup = null;
                         s.ready = true; s.phase = '就绪'; s.status = '待命'; s.error = null;
                         host.clearTimeout(s.timeout); attachSession(s);
@@ -1366,9 +1450,22 @@
                         if (!sessions.has(id) || disposed) return;
                         identity(s); setActive(id);
                         recordPageStage('副窗口就绪');
+                        for (const seconds of [1, 3, 8, 15, 30]) {
+                            const checkpoint = host.setTimeout(() => {
+                                if (!disposed && sessions.get(id) === s) {
+                                    recordPageStage(`副窗口就绪后 ${seconds} 秒`);
+                                    if (seconds === 30) w.__PT_DIAGNOSTICS_STOP__?.();
+                                }
+                            }, seconds * 1000);
+                            s.cleanups.push(() => host.clearTimeout(checkpoint));
+                        }
                     } catch (error) { host.clearTimeout(s.timeout); s.status = '加载失败'; s.error = shortError(error); s.phase = '目标聊天读取失败'; recordPageStage('目标聊天读取失败'); queueRender(); notify(s.error); }
                 }, 0);
             };
+            on(c.eventSource, events.EXTENSION_SETTINGS_LOADED || 'extension_settings_loaded', () => {
+                s.extensionsLoaded = true;
+                if (iosBrowser) recordPageStage('副窗口扩展加载完成');
+            }, s);
             on(c.eventSource, events.APP_INITIALIZED || 'app_initialized', () => { s.appInitializedReceived = true; s.phase = 'APP_INITIALIZED 已触发，等待启动收尾'; }, s);
             on(c.eventSource, events.APP_READY || 'app_ready', ready, s);
             s.attached = true; return true;
@@ -1383,6 +1480,7 @@
             s.lastErrorPhase = String(phase).slice(0, 100);
             s.issues ||= [];
             if (s.issues.length < 15) s.issues.push(typeof issue === 'object' ? JSON.parse(JSON.stringify(issue)) : String(issue).slice(0, 100));
+            if (iosBrowser && s.issues.length <= 3) recordPageStage('副窗口执行错误');
             if (!s.ready && issue?.kind === 'CHAT_INPUT_MISSING') {
                 host.clearTimeout(s.timeout);
                 s.phase = '输入框初始化失败'; s.status = '加载失败';
@@ -1401,6 +1499,7 @@
                 hostABI: !!w.__TAURITAVERN__, sillyTavern: !!w.SillyTavern?.getContext,
                 scriptCount: w.document.scripts.length, originMatches: w.location.origin === host.location.origin,
                 input: w.__PT_INPUT_STATE__?.() || null,
+                loading: bootSnapshot(w),
                 boot: w.__PT_BOOT_TRACE__ ? { resourceErrors: w.__PT_BOOT_TRACE__.resourceErrors,
                     bridgeBytes: w.__PT_BOOT_TRACE__.bridgeBytes || null,
                     bridgeEvents: w.__PT_BOOT_TRACE__.bridgeEvents || null,
@@ -1420,9 +1519,9 @@
             script: 'Parallel Tavern', version: VERSION,
             host: host.__TAURITAVERN__ || host.__TAURI_RUNNING__ ? 'TauriTavern' : 'SillyTavern / browser',
             platformABI: host.__TAURITAVERN__?.abiVersion ?? null,
-            hostAppVersion,
+            hostAppVersion, cleanupErrors, mainErrors: { ...mainErrors },
             startupTiming: { ...startupTiming },
-            iosFixedLayer: iosBrowser, previousPageStage, currentPageStage,
+            iosFixedLayer: iosBrowser, iosReducedCompositing: !!mainCompositingStyle, previousPageStage, currentPageStage,
             navigationType: host.performance?.getEntriesByType?.('navigation')?.[0]?.type || null,
             launcherVisible, enabled, appReady, activeSession: activeId, lastAction,
             sessions: [...sessions.values()].map(s => ({ id: s.id, ready: s.ready, busy: isBusy(s), generating: isGenerating(s), saving: isSaving(s), generationEventActive: !!s.busy, nativeGenerating: s.win?.__PT_CORE__?.is_send_press === true, status: s.status, error: s.error || null, hasCore: !!s.win?.__PT_CORE__, needsConfirmation: !!s.needsConfirmation, attached: !!s.attached, appInitializedReceived: !!s.appInitializedReceived, appReadyReceived: !!s.appReadyReceived, phase: s.phase || null, lastErrorPhase: s.lastErrorPhase || null, sourceInput: s.sourceInput || null, issues: s.issues || [], child: childState(s) })),
@@ -1456,8 +1555,8 @@
     function dispose() {
         if ([...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { notify('子会话仍在运行，请先停止或等待完成再卸载。'); return false; }
         disposed = true;
-        for (const s of sessions.values()) { host.clearTimeout(s.timeout); for (const clean of s.cleanups) clean(); s.frame?.remove(); }
-        for (const clean of teardown) clean();
+        for (const s of sessions.values()) { host.clearTimeout(s.timeout); runCleanups(s.cleanups); s.frame?.remove(); }
+        runCleanups(teardown);
         host.clearTimeout(toastTimer);
         for (const e of [style, shell, launcher, panel, picker, toast, completionBadge]) e.remove();
         delete host[KEY]; return true;
