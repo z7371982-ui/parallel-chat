@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.5.4 — Tavern Helper global script.
+/* Parallel Tavern 0.5.6 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.5.4 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.5.6 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,7 +110,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.4';
+    const VERSION = '0.5.6';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let previousPageStage = null;
     let currentPageStage = null;
@@ -302,7 +302,11 @@
 #pt-panel #pt-character-list .pt-character-choice>.pt-button:first-child{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
 #pt-panel .pt-character-choice .pt-portrait{width:40px;height:40px;font-size:18px}
 #pt-panel .pt-character-copy{min-width:0;flex:1;white-space:normal;overflow-wrap:anywhere}
-#pt-panel #pt-character-list .pt-character-choice>.pt-button:last-child{width:auto;font-size:11px;color:#9b7787;flex-shrink:0}
+#pt-panel #pt-character-list .pt-character-choice>.pt-button:last-child{display:inline-flex;align-items:center;justify-content:center;gap:8px;width:auto;min-height:44px;padding:10px 12px;border:1px solid #d7bec9;border-radius:13px;background:#efe3e8;color:#654956;font-size:12px;font-weight:600;white-space:nowrap;flex-shrink:0}
+#pt-panel #pt-character-list .pt-character-choice>.pt-button:last-child:hover{background:#e5d2dc;border-color:#b993a5}
+#pt-panel #pt-character-list .pt-character-choice>.pt-button:last-child:focus-visible{outline:2px solid #9b6882;outline-offset:2px}
+#pt-panel #pt-character-list .pt-character-choice>.pt-button:last-child:active{background:#dbc3ce}
+#pt-panel .pt-history-arrow{font-size:16px;line-height:1;font-weight:400}
 #pt-panel .pt-character-choice .pt-muted{display:block;margin:3px 0 0}
 #pt-history-list{padding:0 20px 18px}
 #pt-panel #pt-history-list .pt-button{display:block;text-align:left;width:100%;margin:6px 0;background:#f2edeb;white-space:normal;overflow-wrap:anywhere}
@@ -332,7 +336,7 @@
     const picker = element('section'); picker.id = 'pt-picker'; picker.hidden = true;
     picker.setAttribute('aria-label', '选择并行角色'); picker.dataset.ttMobileSurface = 'free-window';
     const toast = element('div'); toast.id = 'pt-toast'; toast.hidden = true; toast.setAttribute('role', 'status');
-    style.textContent += "\n#pt-panel[data-night=\"true\"],#pt-launcher[data-night=\"true\"],#pt-toast[data-night=\"true\"]{color-scheme:dark;background:#242126;border-color:#494149;color:#eee7eb;box-shadow:0 12px 40px #0005;scrollbar-color:#655762 transparent}\n#pt-panel[data-night=\"true\"] .pt-heading,#pt-panel[data-night=\"true\"] .pt-title{color:#f2e9ee}\n#pt-panel[data-night=\"true\"] .pt-button{background:#3b333b;color:#ede1e7}\n#pt-panel[data-night=\"true\"] .pt-button:hover{background:#51434f;color:#fff}\n#pt-panel[data-night=\"true\"] .pt-add,#pt-panel[data-night=\"true\"] .pt-welcome .pt-button{background:#d2b5c5;color:#281f26}\n#pt-panel[data-night=\"true\"] .pt-card.pt-active,#pt-panel[data-night=\"true\"] .pt-menu{background:#302a31}\n#pt-panel[data-night=\"true\"] .pt-session-open,#pt-panel[data-night=\"true\"] .pt-icon-button,#pt-panel[data-night=\"true\"] #pt-character-list .pt-button{background:transparent}\n#pt-panel[data-night=\"true\"] .pt-session-open:hover{background:#433743}\n#pt-panel[data-night=\"true\"] .pt-footer{background:#242126;border-color:#494149;color:#c2b2bc}\n#pt-panel[data-night=\"true\"] .pt-section-label,#pt-panel[data-night=\"true\"] .pt-character-choice{border-color:#494149;color:#bfb0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-subheading,.pt-overview,.pt-current,.pt-preview,.pt-status,.pt-muted,.pt-chat-name),#pt-launcher[data-night=\"true\"] .pt-dock-note{color:#c2b0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-completed,.pt-ready-count),#pt-panel[data-night=\"true\"] .pt-card[data-unread=\"true\"] .pt-status{color:#edb1a4}\n#pt-panel[data-night=\"true\"] .pt-card[data-busy=\"true\"] .pt-status{color:#d2acd1}\n#pt-panel[data-night=\"true\"] .pt-error{color:#ffb3b3}\n#pt-panel[data-night=\"true\"] .pt-portrait,#pt-launcher[data-night=\"true\"] .pt-portrait{background:#51424c;color:#efcadc;border-color:#242126}\n#pt-panel[data-night=\"true\"] #pt-search,#pt-panel[data-night=\"true\"] #pt-diagnostic-text{background:#302a31!important;color:#ede1e7!important;border-color:#675561!important;color-scheme:dark}\n#pt-panel[data-night=\"true\"] #pt-search::placeholder{color:#bcaab5}\n#pt-panel[data-night=\"true\"] #pt-history-list .pt-button{background:#38303a;color:#eee4eb}\n#pt-panel[data-night=\"true\"] #pt-character-list .pt-character-choice>.pt-button:last-child{color:#d4adc5}\n#pt-panel[data-night=\"true\"] .pt-footer .pt-button{color:#d0bec9}\n\n";
+    style.textContent += "\n#pt-panel[data-night=\"true\"],#pt-launcher[data-night=\"true\"],#pt-toast[data-night=\"true\"]{color-scheme:dark;background:#242126;border-color:#494149;color:#eee7eb;box-shadow:0 12px 40px #0005;scrollbar-color:#655762 transparent}\n#pt-panel[data-night=\"true\"] .pt-heading,#pt-panel[data-night=\"true\"] .pt-title{color:#f2e9ee}\n#pt-panel[data-night=\"true\"] .pt-button{background:#3b333b;color:#ede1e7}\n#pt-panel[data-night=\"true\"] .pt-button:hover{background:#51434f;color:#fff}\n#pt-panel[data-night=\"true\"] .pt-add,#pt-panel[data-night=\"true\"] .pt-welcome .pt-button{background:#d2b5c5;color:#281f26}\n#pt-panel[data-night=\"true\"] .pt-card.pt-active,#pt-panel[data-night=\"true\"] .pt-menu{background:#302a31}\n#pt-panel[data-night=\"true\"] .pt-session-open,#pt-panel[data-night=\"true\"] .pt-icon-button,#pt-panel[data-night=\"true\"] #pt-character-list .pt-button{background:transparent}\n#pt-panel[data-night=\"true\"] .pt-session-open:hover{background:#433743}\n#pt-panel[data-night=\"true\"] .pt-footer{background:#242126;border-color:#494149;color:#c2b2bc}\n#pt-panel[data-night=\"true\"] .pt-section-label,#pt-panel[data-night=\"true\"] .pt-character-choice{border-color:#494149;color:#bfb0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-subheading,.pt-overview,.pt-current,.pt-preview,.pt-status,.pt-muted,.pt-chat-name),#pt-launcher[data-night=\"true\"] .pt-dock-note{color:#c2b0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-completed,.pt-ready-count),#pt-panel[data-night=\"true\"] .pt-card[data-unread=\"true\"] .pt-status{color:#edb1a4}\n#pt-panel[data-night=\"true\"] .pt-card[data-busy=\"true\"] .pt-status{color:#d2acd1}\n#pt-panel[data-night=\"true\"] .pt-error{color:#ffb3b3}\n#pt-panel[data-night=\"true\"] .pt-portrait,#pt-launcher[data-night=\"true\"] .pt-portrait{background:#51424c;color:#efcadc;border-color:#242126}\n#pt-panel[data-night=\"true\"] #pt-search,#pt-panel[data-night=\"true\"] #pt-diagnostic-text{background:#302a31!important;color:#ede1e7!important;border-color:#675561!important;color-scheme:dark}\n#pt-panel[data-night=\"true\"] #pt-search::placeholder{color:#bcaab5}\n#pt-panel[data-night=\"true\"] #pt-history-list .pt-button{background:#38303a;color:#eee4eb}\n#pt-panel[data-night=\"true\"] #pt-character-list .pt-character-choice>.pt-button:last-child{background:#493843;border-color:#806372;color:#f3dce7}\n#pt-panel[data-night=\"true\"] .pt-footer .pt-button{color:#d0bec9}\n\n";
     doc.body.append(shell, launcher, panel, toast, completionBadge);
     const safeArea = element('div');
     safeArea.dataset.ttMobileSurface = 'none';
@@ -789,7 +793,9 @@
                 const copy = element('span', 'pt-character-copy', c.name);
                 copy.append(element('span', 'pt-muted', '最近聊天'));
                 recent.append(face, copy);
-                item.append(recent, button('其他对话', () => void showHistory(c), `${c.name}的其他对话`)); list.append(item);
+                const history = button('其他对话', () => void showHistory(c), `${c.name}的其他对话`);
+                const arrow = element('span', 'pt-history-arrow', '→'); arrow.setAttribute('aria-hidden', 'true'); history.append(arrow);
+                item.append(recent, history); list.append(item);
             }
             if (!characters.length) list.append(element('p', 'pt-muted', '没有匹配角色'));
             if (characters.length > 120) list.append(element('p', 'pt-muted', '仅显示前 120 个，请继续输入名称筛选。'));
@@ -802,6 +808,7 @@
         const row = element('div', 'pt-row');
         row.append(element('span', 'pt-heading', character.name), button('返回', showPicker));
         const list = element('div', 'pt-history-list');
+        list.id = 'pt-history-list';
         list.append(element('p', 'pt-muted', '正在读取聊天记录…')); picker.append(row, list); render();
         try {
             const response = await host.fetch(new URL('api/characters/chats', host.location.href).href, {
@@ -1164,6 +1171,7 @@
             frame.name = `pt-${id}`; frame.id = `pt-frame-${id}`;
             frame.dataset.ttMobileSurface = 'viewport-host'; frame.setAttribute('aria-hidden', 'true');
             s.frame = frame;
+            s.cleanups.push(() => frame.contentWindow?.__PT_SETTINGS_DISPOSE__?.());
             shell.append(frame);
             recordPageStage('初始化副窗口');
             layoutSessions(); sessionSizer?.observe(frame);

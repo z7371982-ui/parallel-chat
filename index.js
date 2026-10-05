@@ -6,9 +6,8 @@ import { installCharacterProfiles } from './character-profiles.js';
 const KEY = 'parallel_tavern';
 const CONTROLLER = '__PARALLEL_TAVERN_V2__';
 
-// Each parallel child loads the native extension list too. Only the main
-// document owns the settings panel and controller.
-if (!window.__PT_CHILD_ID__ && !window.parent.__PT_CHILD_ID__) {
+// Child pages show settings too, but only the main page starts the runtime.
+if (window.__PT_CHILD_ID__ || !window.parent.__PT_CHILD_ID__) {
     void initialize().catch(error => {
         console.error('[Parallel Tavern extension]', error);
         const status = document.getElementById('pt-extension-status');
@@ -18,11 +17,22 @@ if (!window.__PT_CHILD_ID__ && !window.parent.__PT_CHILD_ID__) {
 
 async function initialize() {
     if (document.getElementById('pt-extension-settings')) return;
-    const settings = extension_settings[KEY] ||= {};
+    const child = !!window.__PT_CHILD_ID__;
+    const owner = child ? window.parent : window;
+    const bridge = child ? owner.__PT_SETTINGS_BRIDGE__ : null;
+    if (child && !bridge) throw new Error('主页面设置接口尚未就绪，请刷新后重试。');
+    const settings = child ? bridge.settings : (extension_settings[KEY] ||= {});
+    const persist = child ? bridge.persist : () => {
+        saveSettingsDebounced();
+        owner.dispatchEvent(new owner.Event('pt-extension-settings'));
+    };
     if (typeof settings.showLauncher !== 'boolean') settings.showLauncher = true;
+    if (!child) {
+    window.__PT_SETTINGS_BRIDGE__ = { settings, persist };
     window.__PT_EXTENSION_CONFIG__ = settings;
     window.__PT_INSTALL_SCROLL_QR_COMPAT__ = installScrollQrCompatibility;
     window.__PT_INSTALL_CHARACTER_PROFILES__ = (win, options) => installCharacterProfiles(win, { ...options, settings, save: saveSettingsDebounced });
+    }
 
     const root = document.createElement('div');
     root.id = 'pt-extension-settings';
@@ -30,7 +40,7 @@ async function initialize() {
     root.innerHTML = `
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>并行对话 · 0.5.4</b>
+                <b>并行对话 · 0.5.6</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
@@ -56,27 +66,41 @@ async function initialize() {
     checkbox.checked = settings.showLauncher;
     const avatarSwitch = root.querySelector('#pt-extension-avatar-switch');
     avatarSwitch.checked = settings.avatarQuickSwitch === true;
-    avatarSwitch.addEventListener('change', () => { settings.avatarQuickSwitch = avatarSwitch.checked; saveSettingsDebounced(); });
+    avatarSwitch.addEventListener('change', () => { settings.avatarQuickSwitch = avatarSwitch.checked; persist(); });
     const night = root.querySelector('#pt-extension-night');
     const remember = root.querySelector('#pt-extension-character-settings');
     remember.checked = settings.rememberCharacterSettings !== false;
-    remember.addEventListener('change', () => { settings.rememberCharacterSettings = remember.checked; saveSettingsDebounced(); });
-    try { night.checked = localStorage.getItem('parallel-tavern.night-mode') === 'on'; } catch {}
+    remember.addEventListener('change', () => { settings.rememberCharacterSettings = remember.checked; persist(); });
+    try { night.checked = owner.localStorage.getItem('parallel-tavern.night-mode') === 'on'; } catch {}
     night.addEventListener('change', () => {
-        try { localStorage.setItem('parallel-tavern.night-mode', night.checked ? 'on' : 'off'); } catch {}
-        window[CONTROLLER]?.setNightMode?.(night.checked);
+        try { owner.localStorage.setItem('parallel-tavern.night-mode', night.checked ? 'on' : 'off'); } catch {}
+        owner[CONTROLLER]?.setNightMode?.(night.checked);
     });
-    window.addEventListener('pt-night-mode', event => { night.checked = !!event.detail; });
+    const sync = () => {
+        checkbox.checked = settings.showLauncher !== false;
+        avatarSwitch.checked = settings.avatarQuickSwitch === true;
+        remember.checked = settings.rememberCharacterSettings !== false;
+        try { night.checked = owner.localStorage.getItem('parallel-tavern.night-mode') === 'on'; } catch {}
+    };
+    owner.addEventListener('pt-extension-settings', sync);
+    owner.addEventListener('pt-night-mode', sync);
+    const disposeSettings = () => {
+        owner.removeEventListener('pt-extension-settings', sync);
+        owner.removeEventListener('pt-night-mode', sync);
+    };
+    window.__PT_SETTINGS_DISPOSE__ = disposeSettings;
+    window.addEventListener('pagehide', disposeSettings, { once: true });
     checkbox.addEventListener('change', () => {
         settings.showLauncher = checkbox.checked;
-        saveSettingsDebounced();
-        window[CONTROLLER]?.setLauncherVisible?.(settings.showLauncher);
+        persist();
+        owner[CONTROLLER]?.setLauncherVisible?.(settings.showLauncher);
         status.textContent = settings.showLauncher ? '悬浮窗已显示。' : '悬浮窗已隐藏，可从这里重新打开。';
     });
     root.querySelector('button').addEventListener('click', () => {
-        if (window[CONTROLLER]) window[CONTROLLER].show();
+        if (owner[CONTROLLER]) owner[CONTROLLER].show();
         else status.textContent = '正在等待酒馆启动，请稍后重试。';
     });
+    if (child) return;
     if (window[CONTROLLER] && typeof window[CONTROLLER].setLauncherVisible !== 'function') {
         status.textContent = '检测到酒馆助手旧脚本。请等生成结束后停用旧脚本并刷新，扩展将接管。';
         return;
