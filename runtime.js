@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.4.3 — Tavern Helper global script.
+/* Parallel Tavern 0.5.2 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.4.3 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.5.2 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,11 +110,14 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.4.3';
+    const VERSION = '0.5.2';
     const MAX_SESSIONS = 3;
     const sessions = new Map();
+    const recentChatTimes = new Map();
     const teardown = [];
     const soundKey = 'parallel-tavern.completion-sound';
+    let nightMode = false;
+    try { nightMode = host.localStorage.getItem('parallel-tavern.night-mode') === 'on'; } catch {}
     let soundEnabled = true;
     try { soundEnabled = host.localStorage.getItem(soundKey) !== 'off'; } catch {}
     let audioContext = null;
@@ -276,7 +279,9 @@
 #pt-launcher .pt-portrait{width:32px;height:32px;font-size:13px;border:2px solid #fcf9f5;margin-left:-4px}
 #pt-launcher .pt-dock-label{display:block;font-size:11px;line-height:1.5;font-weight:600;text-align:left}
 #pt-launcher .pt-dock-note{display:block;font-size:9px;color:#a4949b;font-weight:400}
-#pt-completion-badge{position:fixed;inset:auto;margin:0;box-sizing:border-box;min-width:23px;height:23px;padding:0 5px;border:2px solid #fcf9f5;border-radius:12px;background:#c28880;color:white;font:600 11px/19px system-ui;text-align:center;pointer-events:none;z-index:2147483004;box-shadow:0 2px 5px #37293218}
+#pt-completion-badge{position:fixed;inset:0 auto auto 0;margin:0;width:0;height:0;min-width:0;min-height:0;padding:0;border:0;background:transparent;overflow:visible;pointer-events:none;z-index:2147483004}
+#pt-completion-badge .pt-avatar-badge{position:fixed;box-sizing:border-box;width:16px;height:16px;padding:0;border:1.5px solid #fcf9f5;border-radius:50%;background:#c28880;color:white;font:600 9px/13px system-ui;text-align:center;pointer-events:none;box-shadow:0 1px 3px #37293218}
+#pt-completion-badge[data-night="true"] .pt-avatar-badge{border-color:#242126;background:#ba7e94;color:#fff}
 #pt-completion-badge[hidden]{display:none!important}
 #pt-toast{pointer-events:none;position:fixed;inset:auto auto calc(20px + env(safe-area-inset-bottom,0px)) 50%;transform:translateX(-50%);z-index:2147483003;width:max-content;max-width:calc(100vw - 32px);margin:0;padding:12px 16px;border:1px solid #fff;border-radius:14px;background:#faf4f1;color:#805f6c;box-shadow:0 4px 20px #39283020;font-size:12px;white-space:pre-wrap}
 @keyframes pt-orbit{to{transform:rotate(360deg)}}
@@ -285,7 +290,9 @@
 
 #pt-panel .pt-chat-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;color:#796b75;margin-top:3px}
 #pt-panel .pt-character-choice{display:flex;gap:8px;align-items:center;border-bottom:1px solid #eee9e7}
-#pt-panel #pt-character-list .pt-character-choice>.pt-button:first-child{flex:1;min-width:0}
+#pt-panel #pt-character-list .pt-character-choice>.pt-button:first-child{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
+#pt-panel .pt-character-choice .pt-portrait{width:40px;height:40px;font-size:18px}
+#pt-panel .pt-character-copy{min-width:0;flex:1;white-space:normal;overflow-wrap:anywhere}
 #pt-panel #pt-character-list .pt-character-choice>.pt-button:last-child{width:auto;font-size:11px;color:#9b7787;flex-shrink:0}
 #pt-panel .pt-character-choice .pt-muted{display:block;margin:3px 0 0}
 #pt-history-list{padding:0 20px 18px}
@@ -296,7 +303,18 @@
     `;
     doc.head.append(style);
     const shell = element('div'); shell.id = 'pt-shell'; shell.dataset.ttMobileSurface = 'none';
-    const launcher = button('并行', () => { panelOpen = !panelOpen; pickerOpen = false; render(); });
+    const launcher = button('并行', event => {
+        if (enabled && host.__PT_EXTENSION_CONFIG__?.avatarQuickSwitch === true && event.detail > 0) {
+            // Pointer capture for dragging retargets clicks to the launcher.
+            // Hit-test visible avatars; reverse order respects overlapping faces.
+            const face = [...launcher.querySelectorAll('[data-pt-session]')].reverse().find(node => {
+                const r = node.getBoundingClientRect();
+                return event.clientX >= r.left && event.clientX <= r.right && event.clientY >= r.top && event.clientY <= r.bottom;
+            });
+            if (face) { setActive(face.dataset.ptSession); return; }
+        }
+        panelOpen = !panelOpen; pickerOpen = false; render();
+    });
     launcher.id = 'pt-launcher'; launcher.dataset.ttMobileSurface = 'free-window';
     const completionBadge = element('span'); completionBadge.id = 'pt-completion-badge'; completionBadge.hidden = true; completionBadge.setAttribute('aria-hidden', 'true');
     const panel = element('section'); panel.id = 'pt-panel'; panel.hidden = true;
@@ -304,6 +322,7 @@
     const picker = element('section'); picker.id = 'pt-picker'; picker.hidden = true;
     picker.setAttribute('aria-label', '选择并行角色'); picker.dataset.ttMobileSurface = 'free-window';
     const toast = element('div'); toast.id = 'pt-toast'; toast.hidden = true; toast.setAttribute('role', 'status');
+    style.textContent += "\n#pt-panel[data-night=\"true\"],#pt-launcher[data-night=\"true\"],#pt-toast[data-night=\"true\"]{color-scheme:dark;background:#242126;border-color:#494149;color:#eee7eb;box-shadow:0 12px 40px #0005;scrollbar-color:#655762 transparent}\n#pt-panel[data-night=\"true\"] .pt-heading,#pt-panel[data-night=\"true\"] .pt-title{color:#f2e9ee}\n#pt-panel[data-night=\"true\"] .pt-button{background:#3b333b;color:#ede1e7}\n#pt-panel[data-night=\"true\"] .pt-button:hover{background:#51434f;color:#fff}\n#pt-panel[data-night=\"true\"] .pt-add,#pt-panel[data-night=\"true\"] .pt-welcome .pt-button{background:#d2b5c5;color:#281f26}\n#pt-panel[data-night=\"true\"] .pt-card.pt-active,#pt-panel[data-night=\"true\"] .pt-menu{background:#302a31}\n#pt-panel[data-night=\"true\"] .pt-session-open,#pt-panel[data-night=\"true\"] .pt-icon-button,#pt-panel[data-night=\"true\"] #pt-character-list .pt-button{background:transparent}\n#pt-panel[data-night=\"true\"] .pt-session-open:hover{background:#433743}\n#pt-panel[data-night=\"true\"] .pt-footer{background:#242126;border-color:#494149;color:#c2b2bc}\n#pt-panel[data-night=\"true\"] .pt-section-label,#pt-panel[data-night=\"true\"] .pt-character-choice{border-color:#494149;color:#bfb0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-subheading,.pt-overview,.pt-current,.pt-preview,.pt-status,.pt-muted,.pt-chat-name),#pt-launcher[data-night=\"true\"] .pt-dock-note{color:#c2b0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-completed,.pt-ready-count),#pt-panel[data-night=\"true\"] .pt-card[data-unread=\"true\"] .pt-status{color:#edb1a4}\n#pt-panel[data-night=\"true\"] .pt-card[data-busy=\"true\"] .pt-status{color:#d2acd1}\n#pt-panel[data-night=\"true\"] .pt-error{color:#ffb3b3}\n#pt-panel[data-night=\"true\"] .pt-portrait,#pt-launcher[data-night=\"true\"] .pt-portrait{background:#51424c;color:#efcadc;border-color:#242126}\n#pt-panel[data-night=\"true\"] #pt-search,#pt-panel[data-night=\"true\"] #pt-diagnostic-text{background:#302a31!important;color:#ede1e7!important;border-color:#675561!important;color-scheme:dark}\n#pt-panel[data-night=\"true\"] #pt-search::placeholder{color:#bcaab5}\n#pt-panel[data-night=\"true\"] #pt-history-list .pt-button{background:#38303a;color:#eee4eb}\n#pt-panel[data-night=\"true\"] #pt-character-list .pt-character-choice>.pt-button:last-child{color:#d4adc5}\n#pt-panel[data-night=\"true\"] .pt-footer .pt-button{color:#d0bec9}\n\n";
     doc.body.append(shell, launcher, panel, toast, completionBadge);
     const safeArea = element('div');
     safeArea.dataset.ttMobileSurface = 'none';
@@ -324,12 +343,18 @@
     }
     function positionCompletionBadge() {
         if (completionBadge.hidden) return;
-        const r = launcher.getBoundingClientRect();
         const viewport = host.visualViewport;
         const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
         const width = viewport?.width || host.innerWidth, height = viewport?.height || host.innerHeight;
-        completionBadge.style.setProperty('left', `${Math.max(left + 2, Math.min(left + width - 25, r.right - 14))}px`, 'important');
-        completionBadge.style.setProperty('top', `${Math.max(top + 2, Math.min(top + height - 25, r.top - 9))}px`, 'important');
+        const faces = [...launcher.querySelectorAll('[data-pt-session]')];
+        for (const badge of completionBadge.children) {
+            const face = faces.find(node => node.dataset.ptSession === badge.dataset.ptSession);
+            badge.hidden = !face;
+            if (!face) continue;
+            const r = face.getBoundingClientRect();
+            badge.style.setProperty('left', `${Math.max(left + 2, Math.min(left + width - 18, r.right - 8))}px`, 'important');
+            badge.style.setProperty('top', `${Math.max(top + 2, Math.min(top + height - 18, r.top - 5))}px`, 'important');
+        }
     }
     // TT can give generic floating containers a zero/auto height. Do not resolve
     // a frame's height through a percentage of that container: size both explicitly.
@@ -465,11 +490,21 @@
         host.clearTimeout(toastTimer); toastTimer = host.setTimeout(() => { toast.hidden = true; setFloating(toast, false); }, 6500);
     };
 
+    function chatTimestamp(value) {
+        if (value == null || value === '') return 0;
+        const number = Number(value);
+        const time = Number.isFinite(number) ? number : Date.parse(value);
+        return Number.isFinite(time) && time > 0 ? time : 0;
+    }
     function identity(session) {
         if (!session.ready) return;
         try {
             const c = ctx(session.win);
             session.avatar = c.characters[c.characterId]?.avatar || null;
+            if (session.avatar) {
+                const time = chatTimestamp(c.characters[c.characterId]?.date_last_chat);
+                recentChatTimes.set(session.avatar, Math.max(time, recentChatTimes.get(session.avatar) || 0));
+            }
             session.title = c.characters[c.characterId]?.name || (c.groupId ? '群聊（原生模式）' : '主页面');
             session.chatId = c.chatId || c.getCurrentChatId?.() || null;
         } catch { /* document may still be loading */ }
@@ -545,12 +580,13 @@
     function setActive(id) {
         lastAction = { action: 'view-session', session: id, time: new Date().toISOString() };
         if (!sessions.has(id)) return;
-        if (!sessions.get(id).ready) {
+        if (!sessions.get(id).ready && !sessions.get(id).needsConfirmation) {
             panelOpen = true; pickerOpen = false; render();
             notify(sessions.get(id).error || '这个角色还在加载，请稍等。');
             return;
         }
         const switching = activeId !== id;
+        if (switching) { sessions.get(activeId)?.profile?.flush(); void sessions.get(id).profile?.activate(); }
         if (switching) { cancelReadingRestore(); rememberReading(sessions.get(activeId)); }
         activeId = id;
         sessions.get(id).unreadCompletion = false;
@@ -577,19 +613,33 @@
         if (signature !== launcherSignature) {
             launcherSignature = signature;
             const dock = element('span', 'pt-dock'), faces = element('span', 'pt-dock-faces');
-            for (const s of (enabled ? all : [main])) faces.append(portrait(s));
+            for (const s of (enabled ? all : [main])) {
+                const face = portrait(s); face.dataset.ptSession = s.id; faces.append(face);
+            }
             const label = element('span', 'pt-dock-label', completed.length ? `${completed.length} 个已完成` : '并行会话');
             label.append(element('span', 'pt-dock-note', enabled ? (running ? `${running} 个正在回复` : '点开查看会话') : '点击开启'));
             dock.append(faces, label);
             launcher.replaceChildren(dock);
         }
-        completionBadge.textContent = String(completed.length);
+        completionBadge.replaceChildren(...completed.map(session => {
+            const badge = element('span', 'pt-avatar-badge', '1');
+            badge.dataset.ptSession = session.id;
+            return badge;
+        }));
         completionBadge.hidden = completed.length === 0;
         setFloating(completionBadge, completed.length > 0); positionCompletionBadge();
         const label = completed.length ? `并行对话：${completed.map(s => s.title).join('、')} 已生成完成，待查看` : '并行对话';
         launcher.title = label; launcher.setAttribute('aria-label', label);
     }
+    function applyTheme() { for (const node of [panel, launcher, toast, completionBadge]) node.dataset.night = String(nightMode); }
+    function setNightMode(value) {
+        nightMode = !!value;
+        try { host.localStorage.setItem('parallel-tavern.night-mode', nightMode ? 'on' : 'off'); } catch {}
+        applyTheme(); render();
+        host.dispatchEvent(new host.CustomEvent('pt-night-mode', { detail: nightMode }));
+    }
     function render() {
+        applyTheme();
         if (disposed) return;
         for (const session of sessions.values()) identity(session);
         updateLauncher();
@@ -663,6 +713,8 @@
         if (menuOpen) {
             const menu = element('div', 'pt-menu');
             menu.append(button('复制诊断', exportDiagnostics));
+            const theme = button('夜间模式：' + (nightMode ? '开启' : '关闭'), () => setNightMode(!nightMode), '夜间模式');
+            theme.setAttribute('role', 'switch'); theme.setAttribute('aria-checked', String(nightMode)); menu.append(theme);
             const sound = button(`完成提示音：${soundEnabled ? '开启' : '关闭'}`, () => {
                 soundEnabled = !soundEnabled;
                 try { host.localStorage.setItem(soundKey, soundEnabled ? 'on' : 'off'); } catch {}
@@ -701,11 +753,19 @@
         const fill = () => {
             list.replaceChildren();
             const filter = search.value.toLocaleLowerCase();
+            for (const session of sessions.values()) identity(session);
             const characters = ctx(host).characters.filter(c => c?.avatar && c.name?.toLocaleLowerCase().includes(filter));
+            const recentTime = c => Math.max(chatTimestamp(c.date_last_chat), recentChatTimes.get(c.avatar) || 0);
+            characters.sort((a, b) => recentTime(b) - recentTime(a));
             for (const c of characters.slice(0, 120)) {
                 const item = element('div', 'pt-character-choice');
-                const recent = button(c.name, () => void openCharacter(c.avatar));
-                recent.append(element('span', 'pt-muted', '最近聊天'));
+                const recent = button('', () => void openCharacter(c.avatar), c.name);
+                const face = portrait({ title: c.name, avatar: c.avatar });
+                const image = face.querySelector('img');
+                if (image) { image.loading = 'lazy'; image.decoding = 'async'; }
+                const copy = element('span', 'pt-character-copy', c.name);
+                copy.append(element('span', 'pt-muted', '最近聊天'));
+                recent.append(face, copy);
                 item.append(recent, button('其他对话', () => void showHistory(c), `${c.name}的其他对话`)); list.append(item);
             }
             if (!characters.length) list.append(element('p', 'pt-muted', '没有匹配角色'));
@@ -752,6 +812,10 @@
         });
     }
     function attachSession(session) {
+        if (host.__PT_INSTALL_CHARACTER_PROFILES__ && !session.profile) {
+            session.profile = host.__PT_INSTALL_CHARACTER_PROFILES__(session.win, { busy: () => isBusy(session), notify });
+            session.cleanups.push(() => session.profile.dispose());
+        }
         if (host.__PT_INSTALL_SCROLL_QR_COMPAT__) session.cleanups.push(host.__PT_INSTALL_SCROLL_QR_COMPAT__(session.win, () => sessions.get(activeId)?.win || host));
         const w = session.win, c = ctx(w), events = c.eventTypes || c.event_types;
         if (w !== host) session.cleanups.push(bindAudioGesture(w));
@@ -802,6 +866,7 @@
     function closeSession(session) {
         if (session.id === 'main') return;
         if (isBusy(session)) return notify('请先停止或等待这个角色生成、保存结束。');
+        identity(session);
         if (session.ready) {
             const input = session.win.document.querySelector('#send_textarea');
             if (input?.value && !host.confirm('这个会话还有未发送的草稿。仍然关闭？')) return;
@@ -917,7 +982,33 @@
         };
         // Tauri does not consistently inject its JS API into same-origin frames.
         // Public Tauri functions keep their original callback registry in parent.
-        if (parentHost.__TAURI__) window.__TAURI__ = parentHost.__TAURI__;
+        const bridgeBytes = trace.bridgeBytes = { arrayBuffers: 0, uint8Arrays: 0 };
+        function localizeBinary(value) {
+            if (value instanceof ArrayBuffer || value instanceof Uint8Array) return value;
+            // Keep IPC and callback ownership in the parent. Only the returned
+            // byte value is copied into this realm for TT's instanceof checks.
+            try {
+                Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get.call(value);
+                const copy = new Uint8Array(new Uint8Array(value));
+                bridgeBytes.arrayBuffers++;
+                return copy.buffer;
+            } catch {}
+            if (ArrayBuffer.isView(value) && Object.prototype.toString.call(value) === '[object Uint8Array]') {
+                const copy = new Uint8Array(value);
+                bridgeBytes.uint8Arrays++;
+                return copy;
+            }
+            return value;
+        }
+        if (parentHost.__TAURI__) {
+            const api = parentHost.__TAURI__, core = api.core;
+            if (typeof core?.invoke === 'function') {
+                const childApi = Object.create(api), childCore = Object.create(core);
+                Object.defineProperty(childCore, 'invoke', { value: async (...args) => localizeBinary(await core.invoke(...args)), configurable: true });
+                Object.defineProperty(childApi, 'core', { value: childCore, configurable: true });
+                window.__TAURI__ = childApi;
+            } else window.__TAURI__ = api;
+        }
         if (parentHost.__TAURI_INTERNALS__) window.__TAURI_INTERNALS__ = parentHost.__TAURI_INTERNALS__;
         const originalFetch = window.fetch.bind(window);
         const isTT = !!parentHost.__TAURITAVERN__ || !!parentHost.__TAURI_RUNNING__;
@@ -1026,14 +1117,42 @@
             if (frame.dataset.ptBootWritten !== 'yes') throw new Error('宿主阻止了子会话启动脚本。并行面板可用，但此环境暂不能打开并行会话。');
             const watch = host.setInterval(() => {
                 if (s.ready || !sessions.has(id) || disposed) { host.clearInterval(watch); return; }
-                try { attachChild(frame.contentWindow, id); } catch {}
+                try { attachChild(frame.contentWindow, id); revealStartupPopup(s); } catch {}
             }, 250);
             s.cleanups.push(() => host.clearInterval(watch));
-            s.timeout = host.setTimeout(() => {
-                if (!s.ready && !s.error) { s.status = '加载失败'; s.error = `60 秒内未就绪（${s.phase || '等待页面'}）。请点“复制诊断”把结果发给我。`; queueRender(); }
-            }, 60000);
+            armLoadWarning(s);
         } catch (error) {
             s.status = '加载失败'; s.error = shortError(error); queueRender(); notify(s.error);
+        }
+    }
+
+    function armLoadWarning(s) {
+        host.clearTimeout(s.timeout);
+        s.timeout = host.setTimeout(() => {
+            if (!s.ready && !s.error && !s.needsConfirmation) {
+                s.status = '加载较慢，仍在等待'; queueRender();
+            }
+        }, 60000);
+    }
+    function revealStartupPopup(s) {
+        if (s.ready || s.error) return;
+        const w = s.frame?.contentWindow;
+        if (!w) return;
+        // Display native dialogs for the user to decide; never click approval.
+        const popup = w.document.querySelector('dialog[open]');
+        if (popup) {
+            if (!s.needsConfirmation) s.beforePopupPhase = s.phase;
+            s.needsConfirmation = true; s.win = w;
+            s.phase = '等待用户处理宿主弹窗'; s.status = '等待确认';
+            host.clearTimeout(s.timeout);
+            if (s.lastStartupPopup !== popup) {
+                s.lastStartupPopup = popup;
+                setActive(s.id);
+            }
+        } else if (s.needsConfirmation) {
+            s.needsConfirmation = false; s.lastStartupPopup = null;
+            s.phase = s.beforePopupPhase || '继续加载角色'; s.status = '正在载入…';
+            armLoadWarning(s); queueRender();
         }
     }
 
@@ -1048,6 +1167,7 @@
             s.win = w; s.phase = '已找到聊天上下文，等待 APP_READY';
             const ready = () => {
                 s.appReadyReceived = true;
+                if (!s.error) s.status = '正在打开角色…';
                 // Keep request diagnostics running through target chat loading.
                 s.phase = 'APP_READY 已触发，正在打开目标角色';
                 // Don't block native APP_READY dispatch with character navigation.
@@ -1072,8 +1192,12 @@
                         }
                         if (!sessions.has(id) || disposed) return;
                         w.__PT_BOOT_DONE__ = true;
+                        s.needsConfirmation = false; s.lastStartupPopup = null;
                         s.ready = true; s.phase = '就绪'; s.status = '待命'; s.error = null;
-                        host.clearTimeout(s.timeout); attachSession(s); identity(s); setActive(id);
+                        host.clearTimeout(s.timeout); attachSession(s);
+                        await s.profile?.ready;
+                        if (!sessions.has(id) || disposed) return;
+                        identity(s); setActive(id);
                     } catch (error) { host.clearTimeout(s.timeout); s.status = '加载失败'; s.error = shortError(error); s.phase = '目标聊天读取失败'; queueRender(); notify(s.error); }
                 }, 0);
             };
@@ -1110,6 +1234,7 @@
                 scriptCount: w.document.scripts.length, originMatches: w.location.origin === host.location.origin,
                 input: w.__PT_INPUT_STATE__?.() || null,
                 boot: w.__PT_BOOT_TRACE__ ? { resourceErrors: w.__PT_BOOT_TRACE__.resourceErrors,
+                    bridgeBytes: w.__PT_BOOT_TRACE__.bridgeBytes || null,
                     inputCompat: w.__PT_BOOT_TRACE__.inputCompat || null,
                     inputAtDOMContentLoaded: w.__PT_BOOT_TRACE__.inputAtDOMContentLoaded || null,
                     inputAtError: w.__PT_BOOT_TRACE__.inputAtError || null,
@@ -1127,7 +1252,7 @@
             platformABI: host.__TAURITAVERN__?.abiVersion ?? null,
             startupTiming: { ...startupTiming },
             launcherVisible, enabled, appReady, activeSession: activeId, lastAction,
-            sessions: [...sessions.values()].map(s => ({ id: s.id, ready: s.ready, busy: isBusy(s), status: s.status, error: s.error || null, hasCore: !!s.win?.__PT_CORE__, attached: !!s.attached, appInitializedReceived: !!s.appInitializedReceived, appReadyReceived: !!s.appReadyReceived, phase: s.phase || null, lastErrorPhase: s.lastErrorPhase || null, sourceInput: s.sourceInput || null, issues: s.issues || [], child: childState(s) })),
+            sessions: [...sessions.values()].map(s => ({ id: s.id, ready: s.ready, busy: isBusy(s), status: s.status, error: s.error || null, hasCore: !!s.win?.__PT_CORE__, needsConfirmation: !!s.needsConfirmation, attached: !!s.attached, appInitializedReceived: !!s.appInitializedReceived, appReadyReceived: !!s.appReadyReceived, phase: s.phase || null, lastErrorPhase: s.lastErrorPhase || null, sourceInput: s.sourceInput || null, issues: s.issues || [], child: childState(s) })),
             // Deliberately exclude prompts, messages, names, URLs and credentials.
             userAgent: host.navigator.userAgent,
         };
@@ -1182,6 +1307,7 @@
                 }
             });
         }, attachChild, reportChild, diagnostics, dispose,
+        setNightMode,
         getActiveWindow: () => sessions.get(activeId)?.win || host,
         setLauncherVisible: value => {
             launcherVisible = value !== false;

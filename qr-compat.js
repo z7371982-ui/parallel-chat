@@ -48,6 +48,7 @@ export function installScrollQrCompatibility(surface, getActiveWindow) {
         const d=w.document, dialog=d.createElement('dialog');popup=dialog;
         dialog.dataset.ptQrCompat='true';dialog.setAttribute('aria-label','跳转楼层');
         dialog.style.cssText='max-width:90vw;width:420px;box-sizing:border-box;padding:24px;border:1px solid #d9ceca;border-radius:16px;background:#fcfbf9;color:#61545b;';
+        try { if (surface.localStorage.getItem('parallel-tavern.night-mode') === 'on') dialog.style.cssText += 'color-scheme:dark;background:#242126;color:#eee7eb;border-color:#494149;'; } catch {}
         const title=d.createElement('h3');title.textContent='跳转';
         const info=d.createElement('p');info.textContent='当前楼层：#'+current.getAttribute('mesid')+' ｜ 已加载：#'+all[0].getAttribute('mesid')+'—#'+all.at(-1).getAttribute('mesid');
         const input=d.createElement('input');input.type='number';input.min='0';input.step='1';input.value=current.getAttribute('mesid');input.setAttribute('aria-label','目标楼层');input.style.cssText='width:100%;box-sizing:border-box;margin-bottom:12px';
