@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.5.13 — Tavern Helper global script.
+/* Parallel Tavern 0.5.14 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.5.13 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.5.14 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,7 +110,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.13';
+    const VERSION = '0.5.14';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let hostAppVersion = null;
     let cleanupErrors = 0;
@@ -219,7 +219,7 @@
     host.addEventListener('unhandledrejection', mainRejection);
     teardown.push(() => { host.removeEventListener('error', mainError, true); host.removeEventListener('unhandledrejection', mainRejection); });
     // Restrict this reversible workaround to iOS documents owned by this controller.
-    // Do not hide/suspend the native chat: background streaming still needs its DOM.
+    // Keep native chat DOM and script execution alive while background streams run.
     const iosCompositingCSS = `html:root, html:root *, html:root *::before, html:root *::after, html:root ::backdrop {
         -webkit-backdrop-filter: none !important; backdrop-filter: none !important;
     }`;
@@ -238,6 +238,16 @@
         }
     }
     teardown.push(() => { mainCompositingStyle?.remove(); mainCompositingStyle = null; });
+    // The main chat used to keep painting underneath the full-screen child. Only
+    // suppress those covered pixels: visibility preserves sizes, scroll position,
+    // iframe browsing contexts and background generation/Helper/MVU execution.
+    const coveredMainStyle = doc.createElement('style');
+    coveredMainStyle.textContent = `html[data-pt-main-covered="true"] :is(#sheld, #chat, #bg1, #bg_custom, #top-bar, #top-settings-holder),
+        html[data-pt-main-covered="true"] :is(#sheld, #chat, #bg1, #bg_custom, #top-bar, #top-settings-holder) * {
+        visibility: hidden !important;
+    }`;
+    doc.head.append(coveredMainStyle);
+    teardown.push(() => { doc.documentElement.removeAttribute('data-pt-main-covered'); coveredMainStyle.remove(); });
     const soundKey = 'parallel-tavern.completion-sound';
     let nightMode = false;
     try { nightMode = host.localStorage.getItem('parallel-tavern.night-mode') === 'on'; } catch {}
@@ -741,6 +751,8 @@
         if (switching) { sessions.get(activeId)?.profile?.flush(); void sessions.get(id).profile?.activate(); }
         if (switching) { cancelReadingRestore(); rememberReading(sessions.get(activeId)); }
         activeId = id;
+        if (id === 'main') doc.documentElement.removeAttribute('data-pt-main-covered');
+        else doc.documentElement.setAttribute('data-pt-main-covered', 'true');
         sessions.get(id).unreadCompletion = false;
         layoutSessions();
         for (const session of sessions.values()) {
@@ -1078,9 +1090,141 @@
 
     // This prelude executes BEFORE native scripts in each child document. It uses the
     // existing TT bridge, retains native stream parsing, and isolates settings.
-    function childPrelude(id, avatar, baseURL, protectExisting) {
+    // TT 2.3.0 lifecycle compatibility. Execute this function in the target realm.
+    // It preserves renderer scripts, MVU state and the host's existing budget policy.
+    function installTauriRuntimeCompatibility(win) {
+        const noop = () => {};
+        if (typeof window === 'undefined' || win !== window) return noop;
+        let isTauri = !!(win.__TAURI_RUNNING__ || win.__TAURITAVERN__ || win.__TAURI__);
+        try { isTauri ||= win.parent !== win && !!(win.parent.__TAURI_RUNNING__ || win.parent.__TAURITAVERN__); } catch {}
+        if (!isTauri) return noop;
+    
+        const key = '__TAURITAVERN_EMBEDDED_RUNTIME__';
+        const originalDescriptor = Object.getOwnPropertyDescriptor(win, key);
+        const patchedManagers = new WeakSet();
+        const restorers = [];
+        let live = true;
+        let adapterPromise = null;
+        const localElement = element => element instanceof win.HTMLElement && element.ownerDocument === win.document;
+        const isMissing = (error, id) => error?.message === `EmbeddedRuntimeManager.invalidate(${id}): slot not found`;
+        const loadAdapter = () => adapterPromise ||= import(new win.URL(
+            'tauri/main/adapters/embedded-runtime/js-slash-runner-runtime-adapter.js',
+            win.document.baseURI || win.location.href,
+        ).href).then(module => module.createJsSlashRunnerRuntimeAdapter()).catch(error => {
+            adapterPromise = null;
+            throw error;
+        });
+    
+        const patchManager = manager => {
+            if (!live || !manager || typeof manager !== 'object' || patchedManagers.has(manager)) return manager;
+            if (typeof manager.register !== 'function' || typeof manager.invalidate !== 'function') return manager;
+            const registerDescriptor = Object.getOwnPropertyDescriptor(manager, 'register');
+            const invalidateDescriptor = Object.getOwnPropertyDescriptor(manager, 'invalidate');
+            if (!registerDescriptor?.writable || !invalidateDescriptor?.writable) return manager;
+            const originalRegister = manager.register;
+            const originalInvalidate = manager.invalidate;
+            const repairs = new Map();
+    
+            const register = function(slot) {
+                if (!live || !slot || typeof slot !== 'object' || !localElement(slot.element)) {
+                    return originalRegister.apply(this, arguments);
+                }
+                const id = String(slot.id ?? '').trim();
+                const element = slot.element;
+                const visibilityTarget = localElement(slot.visibilityTarget) ? slot.visibilityTarget : element;
+                const disposeSlot = slot.dispose;
+                const wrapped = { ...slot, dispose: function(...args) {
+                    const result = typeof disposeSlot === 'function' ? disposeSlot.apply(this, args) : undefined;
+                    // The manager's internal unregister closure also invokes this
+                    // dispose. Wrapping only manager.unregister misses that path.
+                    if (live) {
+                        for (const target of [element, visibilityTarget]) {
+                            if (target.dataset.ttRuntimeSlotId === id) delete target.dataset.ttRuntimeSlotId;
+                        }
+                    }
+                    return result;
+                } };
+                return originalRegister.call(this, wrapped);
+            };
+    
+            const invalidate = function(id) {
+                try { return originalInvalidate.apply(this, arguments); }
+                catch (error) {
+                    if (!live || !isMissing(error, id)) throw error;
+                    const chat = win.document.getElementById('chat');
+                    if (!localElement(chat)) throw error;
+                    const findHosts = () => [...chat.querySelectorAll('.TH-render[data-tt-runtime-slot-id]')]
+                        .filter(host => localElement(host) && host.dataset.ttRuntimeSlotId === id && host.querySelector('iframe'));
+                    // Do not hide genuine missing-slot API misuse. Recover only a
+                    // live JSR wrapper carrying this exact stale DOM marker.
+                    if (!findHosts().length) throw error;
+                    if (repairs.has(id)) return;
+                    const repair = loadAdapter().then(adapter => {
+                        if (!live) return;
+                        // Another owner may have registered the ID while loading.
+                        try { originalInvalidate.call(manager, id); return; }
+                        catch (retryError) { if (!isMissing(retryError, id)) throw retryError; }
+                        for (const host of findHosts()) {
+                            delete host.dataset.ttRuntimeSlotId;
+                            // This uses the official source/identity/iframe slot
+                            // implementation; it does not replace the live iframe.
+                            adapter.registerHost(manager, host);
+                        }
+                    }).catch(repairError => {
+                        if (live) win.console.error('Parallel Tavern: TT runtime lifecycle recovery failed', repairError);
+                    }).finally(() => repairs.delete(id));
+                    repairs.set(id, repair);
+                    return;
+                }
+            };
+    
+            manager.register = register;
+            manager.invalidate = invalidate;
+            patchedManagers.add(manager);
+            restorers.push(() => {
+                if (manager.register === register) manager.register = originalRegister;
+                if (manager.invalidate === invalidate) manager.invalidate = originalInvalidate;
+            });
+            return manager;
+        };
+    
+        let current = patchManager(win[key]);
+        let getter = null;
+        // TT assigns its public manager once during async bootstrap. Catch that
+        // assignment without polling or installing a second DOM observer.
+        if (!originalDescriptor || (originalDescriptor.configurable && 'value' in originalDescriptor && originalDescriptor.writable)) {
+            getter = () => current;
+            Object.defineProperty(win, key, {
+                configurable: true,
+                enumerable: originalDescriptor?.enumerable ?? true,
+                get: getter,
+                set: next => { current = patchManager(next); },
+            });
+        }
+    
+        return function disposeTauriRuntimeCompatibility() {
+            if (!live) return;
+            live = false;
+            for (const restore of restorers.splice(0)) restore();
+            if (getter && Object.getOwnPropertyDescriptor(win, key)?.get === getter) {
+                Object.defineProperty(win, key, {
+                    configurable: originalDescriptor?.configurable ?? true,
+                    enumerable: originalDescriptor?.enumerable ?? true,
+                    writable: originalDescriptor?.writable ?? true,
+                    value: current,
+                });
+            }
+        };
+    }
+
+    function childPrelude(id, avatar, baseURL, protectExisting, installRuntimeCompatibility) {
         const parentHost = window.parent;
         window.__PT_CHILD_ID__ = id;
+        if (typeof installRuntimeCompatibility === 'function') {
+            const dispose = installRuntimeCompatibility(window);
+            window.__PT_RUNTIME_COMPAT_DISPOSE__ = dispose;
+            window.addEventListener('pagehide', dispose, { once: true });
+        }
         const trace = window.__PT_BOOT_TRACE__ = { requests: [], resourceErrors: {} };
         trace.chatProtection = { existingHistory: !!protectExisting, blockedWrites: 0, verified: false };
         window.__PT_CHAT_WRITE_READY__ = !protectExisting;
@@ -1421,7 +1565,7 @@
             parsed.querySelectorAll('base').forEach(n => n.remove());
             const base = parsed.createElement('base'); base.href = host.location.href;
             const bootstrap = parsed.createElement('script');
-            bootstrap.textContent = `(${childPrelude.toString()})(${JSON.stringify(id)},${JSON.stringify(avatar)},${JSON.stringify(host.location.href)},${s.existingHistory});`.replace(/<\/script/gi, '<\\/script');
+            bootstrap.textContent = `(${childPrelude.toString()})(${JSON.stringify(id)},${JSON.stringify(avatar)},${JSON.stringify(host.location.href)},${s.existingHistory},${installTauriRuntimeCompatibility.toString()});`.replace(/<\/script/gi, '<\\/script');
             parsed.head.prepend(bootstrap); parsed.head.prepend(base);
             if (iosBrowser) {
                 const reduced = parsed.createElement('style'); reduced.id = 'pt-ios-compositing';
@@ -1446,7 +1590,7 @@
                     if (w.__PT_CHILD_ID__ !== id || (guardedDocument && guardedDocument !== w.document)) return navigationError();
                     if (!guardedDocument) {
                         guardedDocument = w.document;
-                        for (const clean of [w.__PT_BRIDGE_DISPOSE__, w.__PT_DIAGNOSTICS_STOP__]) if (typeof clean === 'function') s.cleanups.push(clean);
+                        for (const clean of [w.__PT_BRIDGE_DISPOSE__, w.__PT_DIAGNOSTICS_STOP__, w.__PT_RUNTIME_COMPAT_DISPOSE__]) if (typeof clean === 'function') s.cleanups.push(clean);
                         w.addEventListener('pagehide', navigationError, { once: true });
                         s.cleanups.push(() => w.removeEventListener('pagehide', navigationError));
                     }
@@ -1728,6 +1872,7 @@
             else notify('脚本已停用，将在现有生成结束后移除并行界面。');
         },
     };
+    teardown.push(installTauriRuntimeCompatibility(host));
     attachSession(main);
     const events = ctx(host).eventTypes || ctx(host).event_types;
     on(ctx(host).eventSource, events.APP_READY || 'app_ready', () => { appReady = true; queueRender(); }, main);
