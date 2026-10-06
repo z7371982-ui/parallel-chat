@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.5.14 — Tavern Helper global script.
+/* Parallel Tavern 0.5.16 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.5.14 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.5.16 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -102,15 +102,19 @@
             }
         }, 500);
     }
-    window.addEventListener('pagehide', () => {
+    const releaseOwner = event => {
+        // Cached documents resume without evaluating the extension again.
+        if (event.persisted) return;
+        window.removeEventListener('pagehide', releaseOwner);
         stopped = true; window.clearInterval(retry); pendingEntry?.remove();
         if (host?.[KEY]?.owner === owner) host[KEY].requestDispose();
-    }, { once: true });
+    };
+    window.addEventListener('pagehide', releaseOwner);
 
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.14';
+    const VERSION = '0.5.16';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let hostAppVersion = null;
     let cleanupErrors = 0;
@@ -164,7 +168,7 @@
         pageStages.push(entry);
         if (pageStages.length > 16) pageStages.shift();
         currentPageStage = { ...currentPageStage, version: VERSION, pageId: diagnosticPageId, ...entry, visibility: doc.visibilityState, cleanupErrors, mainErrors: { ...mainErrors }, recentStages: [...pageStages] };
-        if (stage === '副窗口就绪' || stage === '关闭副窗口' || stage.startsWith('副窗口就绪后') || stage === '副窗口扩展加载完成' || stage === '副窗口执行错误' || stage === '主页面执行错误' || stage === '页面转入后台') {
+        if (stage === '切换到副窗口' || stage === '副窗口就绪' || stage === '关闭副窗口' || stage.startsWith('副窗口就绪后') || stage === '副窗口扩展加载完成' || stage === '副窗口执行错误' || stage === '主页面执行错误' || stage === '页面转入后台') {
             currentPageStage.resources = [...sessions.values()].map(session => {
                 try {
                     const w = session.win, d = w?.document;
@@ -187,6 +191,7 @@
         return { sampledAt: Date.now(), nativeCalls: t.nativeCalls ? JSON.parse(JSON.stringify(t.nativeCalls)) : null,
             bridgeBytes: t.bridgeBytes ? { ...t.bridgeBytes } : null,
             resourceErrors: { ...t.resourceErrors },
+            startup: t.startup ? { ...t.startup } : null,
             trackedPendingRequests: t.requests.filter(r => r.state === 'pending').length,
             recentRequests: t.requests.slice(-12).map(r => ({ route: r.route, state: r.state, status: r.status ?? null,
                 elapsedMs: r.elapsedMs ?? Date.now() - r.started })),
@@ -708,10 +713,18 @@
         try {
             const w = session.win, el = chatScroller(w);
             if (!el) return;
+            const scrollTop = el.scrollTop;
+            const bottom = el.scrollHeight - el.clientHeight - scrollTop < 8;
+            // At the bottom there is no anchor to restore: avoid synchronously
+            // measuring every message while switching two live chat documents.
+            if (bottom) {
+                session.reading = { chatId: ctx(w).chatId || ctx(w).getCurrentChatId?.(), scrollTop, bottom: true };
+                return;
+            }
             const top = el === w.document.scrollingElement ? 0 : el.getBoundingClientRect().top + el.clientTop;
             const anchor = [...el.querySelectorAll('.mes[mesid]')].find(n => n.getBoundingClientRect().bottom > top && n.getBoundingClientRect().height > 0);
             session.reading = { chatId: ctx(w).chatId || ctx(w).getCurrentChatId?.(),
-                scrollTop: el.scrollTop, bottom: el.scrollHeight - el.clientHeight - el.scrollTop < 8,
+                scrollTop, bottom: false,
                 mesid: anchor?.getAttribute('mesid'), offset: anchor ? anchor.getBoundingClientRect().top - top : 0 };
         } catch {}
     }
@@ -726,9 +739,10 @@
         const apply = () => {
             if (cancelled || disposed || activeId !== session.id || (ctx(w).chatId || ctx(w).getCurrentChatId?.()) !== saved.chatId) return;
             const el = chatScroller(w); if (!el) return;
+            if (saved.bottom) { el.scrollTo({ top: el.scrollHeight - el.clientHeight, behavior: 'instant' }); return; }
             const anchor = [...el.querySelectorAll('.mes[mesid]')].find(n => n.getAttribute('mesid') === saved.mesid);
             const top = el === w.document.scrollingElement ? 0 : el.getBoundingClientRect().top + el.clientTop;
-            const value = saved.bottom ? el.scrollHeight - el.clientHeight : anchor ? el.scrollTop + anchor.getBoundingClientRect().top - top - saved.offset : saved.scrollTop;
+            const value = anchor ? el.scrollTop + anchor.getBoundingClientRect().top - top - saved.offset : saved.scrollTop;
             el.scrollTo({ top: value, behavior: 'instant' });
         };
         const raf = host.requestAnimationFrame(() => { apply(); });
@@ -1217,15 +1231,74 @@
         };
     }
 
+    // TT emits APP_READY before activating deferred third-party extensions;
+    // ST extensions can also have asynchronous APP_READY initialization.
+    // This runs as a static module before the host entry, because extension
+    // completion is not replayed by TT's EventEmitter to late subscribers.
+    function observeChildStartupEvents(eventSource, events) {
+        const startup = window.__PT_BOOT_TRACE__.startup;
+        startup.observerInstalled = true;
+        let stopped = false;
+        const notify = () => {
+            if (stopped) return;
+            try { window.parent.__PARALLEL_TAVERN_V2__?.attachChild(window, window.__PT_CHILD_ID__); } catch {}
+        };
+        const extensionEvent = events.EXTENSION_SETTINGS_LOADED || 'extension_settings_loaded';
+        const appEvent = events.APP_READY || 'app_ready';
+        const originalEmit = eventSource.emit;
+        function emitWithStartupCompletion(...args) {
+            const result = Reflect.apply(originalEmit, this, args);
+            // Only observe this child's two startup events. Other events keep
+            // their original return value, receiver, arguments and timing.
+            if (stopped || this !== eventSource || (args[0] !== appEvent && args[0] !== extensionEvent)) return result;
+            // TT awaits asynchronous listeners. An ordinary first/last listener
+            // or a setTimeout would not guarantee those listeners have finished.
+            return Promise.resolve(result).then(value => {
+                if (!stopped) {
+                    if (args[0] === appEvent) startup.appReady = true;
+                    // A runtime install can emit with a manifest argument; only
+                    // the no-argument startup batch marks all extensions loaded.
+                    if (args[0] === extensionEvent && args.length === 1) startup.extensionsLoaded = true;
+                    notify();
+                    if (startup.appReady && (startup.extensionsLoaded || startup.extensionsEnabled === false)) dispose();
+                }
+                return value;
+            });
+        }
+        const dispose = () => {
+            if (stopped) return;
+            stopped = true;
+            // A third party may have wrapped our function in the meantime.
+            // Never overwrite that wrapper; our inactive layer just forwards.
+            if (eventSource.emit === emitWithStartupCompletion) eventSource.emit = originalEmit;
+            window.removeEventListener('pagehide', leaving);
+        };
+        const leaving = event => { if (!event.persisted) dispose(); };
+        window.__PT_STARTUP_EVENTS_DISPOSE__ = dispose;
+        window.addEventListener('pagehide', leaving);
+        eventSource.emit = emitWithStartupCompletion;
+        notify();
+    }
+
     function childPrelude(id, avatar, baseURL, protectExisting, installRuntimeCompatibility) {
         const parentHost = window.parent;
+        const onFinalPageHide = cleanup => {
+            const leaving = event => {
+                if (event.persisted) return;
+                window.removeEventListener('pagehide', leaving);
+                cleanup();
+            };
+            window.addEventListener('pagehide', leaving);
+        };
         window.__PT_CHILD_ID__ = id;
         if (typeof installRuntimeCompatibility === 'function') {
             const dispose = installRuntimeCompatibility(window);
             window.__PT_RUNTIME_COMPAT_DISPOSE__ = dispose;
-            window.addEventListener('pagehide', dispose, { once: true });
+            onFinalPageHide(dispose);
         }
         const trace = window.__PT_BOOT_TRACE__ = { requests: [], resourceErrors: {} };
+        trace.startup = { tauri: !!(parentHost.__TAURITAVERN__ || parentHost.__TAURI_RUNNING__),
+            extensionsEnabled: null, extensionsLoaded: false, appReady: false, observerInstalled: false };
         trace.chatProtection = { existingHistory: !!protectExisting, blockedWrites: 0, verified: false };
         window.__PT_CHAT_WRITE_READY__ = !protectExisting;
         const guardChatWrite = () => {
@@ -1298,10 +1371,11 @@
         report('子页面引导脚本已执行');
         window.addEventListener('error', e => {
             if (e.target?.tagName === 'SCRIPT') {
-                let requiredEntry = false;
+                let requiredEntry = e.target.id === 'pt-startup-events';
                 try {
                     const source = new URL(e.target.src, baseURL), entry = new URL('script.js', baseURL);
-                    requiredEntry = source.origin === entry.origin && source.pathname === entry.pathname;
+                    requiredEntry ||= source.origin === entry.origin && (source.pathname === entry.pathname
+                        || source.pathname === new URL('init.js', baseURL).pathname);
                 } catch {}
                 report('脚本资源加载失败', { ...errorDetails(null, e.target.src), kind: requiredEntry ? 'CORE_SCRIPT_LOAD_FAILED' : 'SCRIPT_LOAD_FAILED' });
             }
@@ -1339,7 +1413,7 @@
         } catch {}
         const diagnosticStopTimer = setTimeout(() => performanceObserver?.disconnect(), 90000);
         window.__PT_DIAGNOSTICS_STOP__ = () => { performanceObserver?.disconnect(); clearTimeout(diagnosticStopTimer); };
-        window.addEventListener('pagehide', window.__PT_DIAGNOSTICS_STOP__, { once: true });
+        onFinalPageHide(window.__PT_DIAGNOSTICS_STOP__);
         function localizeBinary(value) {
             if (value instanceof ArrayBuffer || value instanceof Uint8Array) return value;
             // Keep IPC and callback ownership in the parent. Only the returned
@@ -1410,7 +1484,7 @@
                         closed = true;
                         for (const stop of [...stops]) void stop();
                     };
-                    window.addEventListener('pagehide', window.__PT_BRIDGE_DISPOSE__, { once: true });
+                    onFinalPageHide(window.__PT_BRIDGE_DISPOSE__);
                 }
                 window.__TAURI__ = childApi;
             } else window.__TAURI__ = api;
@@ -1434,6 +1508,11 @@
         // settings, before their native autoloadLastChat can run.
         const isolateSettingsPayload = payload => {
             if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw bootDataError('启动设置返回异常，已停止副窗口。');
+            if (trace.startup.extensionsEnabled === null) {
+                // Match TT's bootstrap predicate, including first-run/no-settings.
+                trace.startup.extensionsEnabled = !!payload.enable_extensions
+                    && payload.result !== 'file not find' && !!payload.settings;
+            }
             payload.enable_extensions_auto_update = false;
             if (payload.hash_algorithm && payload.settings_hash) localRevision = { hash_algorithm: payload.hash_algorithm, settings_hash: payload.settings_hash };
             else if (payload.tauritavern_settings_revision) localRevision = payload.tauritavern_settings_revision;
@@ -1442,7 +1521,7 @@
             try { settings = serialized ? JSON.parse(payload.settings) : payload.settings; }
             catch { throw bootDataError('启动设置无法解析，已停止副窗口。'); }
             if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
-                // Open the verified target explicitly after APP_READY, rather
+                // Open the verified target after app and extension startup, rather
                 // than loading the parent's last chat during child startup.
                 settings.active_character = null; settings.active_group = null;
                 payload.settings = serialized ? JSON.stringify(settings) : settings;
@@ -1502,7 +1581,18 @@
             if (!window.SillyTavern?.getContext) return;
             if (parentHost.__PARALLEL_TAVERN_V2__?.attachChild(window, id)) clearInterval(timer);
         }, 50);
-        window.addEventListener('pagehide', () => clearInterval(timer), { once: true });
+        onFinalPageHide(() => clearInterval(timer));
+    }
+
+    function configureChildImageLoading(parsed) {
+        // Configure native list templates before the host clones them and assigns
+        // avatar URLs. Do not strip src or delay message/card/Helper images whose
+        // load events and intrinsic dimensions may be part of a running script.
+        const images = parsed.querySelectorAll('#character_template .avatar > img, #user_avatar_template .avatar > img, #group_member_template .avatar > img');
+        for (const img of images) {
+            if (!img.hasAttribute('loading')) img.setAttribute('loading', 'lazy');
+            if (!img.hasAttribute('decoding')) img.setAttribute('decoding', 'async');
+        }
     }
 
     async function openCharacter(avatar, chatName = null) {
@@ -1522,10 +1612,7 @@
         const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, cleanups: [], abort: new host.AbortController() };
         // Reserve before awaiting, so fast double clicks cannot create duplicates.
-        sessions.set(id, s);
-        // Apply iOS compositing optimization BEFORE creating iframe to prevent GPU memory spike
-        syncIOSCompositing();
-        panelOpen = true; pickerOpen = false; render();
+        sessions.set(id, s); syncIOSCompositing(); panelOpen = true; pickerOpen = false; render();
         recordPageStage('开始打开副窗口');
         try {
             s.phase = '确认已有聊天记录';
@@ -1559,6 +1646,7 @@
             s.phase = 'HTML 已读取，准备子页面';
             if (!sessions.has(id) || disposed) return;
             const parsed = new host.DOMParser().parseFromString(html, 'text/html');
+            configureChildImageLoading(parsed);
             s.sourceInput = { count: parsed.querySelectorAll('#send_textarea').length,
                 tag: parsed.querySelector('#send_textarea')?.tagName || null };
             if (s.sourceInput.count !== 1 || s.sourceInput.tag !== 'TEXTAREA') {
@@ -1569,38 +1657,20 @@
             const base = parsed.createElement('base'); base.href = host.location.href;
             const bootstrap = parsed.createElement('script');
             bootstrap.textContent = `(${childPrelude.toString()})(${JSON.stringify(id)},${JSON.stringify(avatar)},${JSON.stringify(host.location.href)},${s.existingHistory},${installTauriRuntimeCompatibility.toString()});`.replace(/<\/script/gi, '<\\/script');
+            {
+                const startupEvents = parsed.createElement('script');
+                startupEvents.type = 'module'; startupEvents.id = 'pt-startup-events';
+                // A static import, not an asynchronous import/poll: execute before
+                // the host entry even when extension completion precedes APP_READY.
+                startupEvents.textContent = `import { eventSource, event_types } from ${JSON.stringify(new URL('scripts/events.js', host.location.href).href)}; (${observeChildStartupEvents.toString()})(eventSource, event_types);`;
+                parsed.head.prepend(startupEvents);
+            }
             parsed.head.prepend(bootstrap); parsed.head.prepend(base);
             if (iosBrowser) {
                 const reduced = parsed.createElement('style'); reduced.id = 'pt-ios-compositing';
                 reduced.textContent = iosCompositingCSS;
+                // Present before the first render; no repeated DOM/style polling.
                 parsed.head.append(reduced);
-                // iOS memory optimization: defer non-critical resources
-                const lazyLoader = parsed.createElement('script');
-                lazyLoader.textContent = `(function(){
-                    if(!window.__PT_CHILD_ID__)return;
-                    const deferImages=()=>{
-                        document.querySelectorAll('img[src]').forEach(img=>{
-                            if(!img.dataset.ptOrigSrc){
-                                img.dataset.ptOrigSrc=img.src;
-                                img.removeAttribute('src');
-                            }
-                        });
-                    };
-                    const restoreImages=()=>{
-                        requestIdleCallback(()=>{
-                            document.querySelectorAll('img[data-pt-orig-src]').forEach(img=>{
-                                if(!img.src&&img.dataset.ptOrigSrc){
-                                    img.src=img.dataset.ptOrigSrc;
-                                }
-                            });
-                        },{timeout:3000});
-                    };
-                    if(document.readyState==='loading'){
-                        deferImages();
-                        document.addEventListener('DOMContentLoaded',restoreImages,{once:true});
-                    }
-                })();`;
-                parsed.head.append(lazyLoader);
             }
             const frame = element('iframe', 'pt-frame pt-hidden'); frame.title = `并行角色：${character.name}`;
             frame.name = `pt-${id}`; frame.id = `pt-frame-${id}`;
@@ -1608,6 +1678,7 @@
             frame.dataset.ttMobileSurface = 'viewport-host'; frame.setAttribute('aria-hidden', 'true');
             s.frame = frame;
             s.cleanups.push(() => frame.contentWindow?.__PT_SETTINGS_DISPOSE__?.());
+            s.cleanups.push(() => frame.contentWindow?.__PT_STARTUP_EVENTS_DISPOSE__?.());
             // A reload would fetch the original host HTML without our prelude.
             // Stop that session instead of letting an unisolated second app run.
             let guardedDocument = null;
@@ -1619,9 +1690,10 @@
                     if (w.__PT_CHILD_ID__ !== id || (guardedDocument && guardedDocument !== w.document)) return navigationError();
                     if (!guardedDocument) {
                         guardedDocument = w.document;
-                        for (const clean of [w.__PT_BRIDGE_DISPOSE__, w.__PT_DIAGNOSTICS_STOP__, w.__PT_RUNTIME_COMPAT_DISPOSE__]) if (typeof clean === 'function') s.cleanups.push(clean);
-                        w.addEventListener('pagehide', navigationError, { once: true });
-                        s.cleanups.push(() => w.removeEventListener('pagehide', navigationError));
+                        for (const clean of [w.__PT_BRIDGE_DISPOSE__, w.__PT_DIAGNOSTICS_STOP__, w.__PT_RUNTIME_COMPAT_DISPOSE__, w.__PT_STARTUP_EVENTS_DISPOSE__]) if (typeof clean === 'function') s.cleanups.push(clean);
+                        const leaving = event => { if (!event.persisted) navigationError(); };
+                        w.addEventListener('pagehide', leaving);
+                        s.cleanups.push(() => w.removeEventListener('pagehide', leaving));
                     }
                 } catch { navigationError(); }
             };
@@ -1634,17 +1706,24 @@
             // document the actual app URL. TT and ST use location.origin/href.
             // Only the HTML fetched from this user's own host is evaluated.
             const writer = doc.createElement('script');
-            const pageHTML = '<!DOCTYPE html>\n' + parsed.documentElement.outerHTML;
+            // Hand over data, not a second huge JavaScript string literal. The
+            // old writer escaped and compiled the entire host HTML again before
+            // the browser could parse it as HTML, increasing startup allocations.
+            Object.defineProperty(frame, '__PT_BOOT_HTML__', { configurable: true,
+                value: '<!DOCTYPE html>\n' + parsed.documentElement.outerHTML });
             // Only the child document boot requires a script in the host realm.
             // The launcher and script button no longer depend on inline injection.
             writer.textContent = `{
                 const f = document.getElementById(${JSON.stringify(frame.id)});
+                const html = f.__PT_BOOT_HTML__;
+                delete f.__PT_BOOT_HTML__;
                 f.contentDocument.open();
-                f.contentDocument.write(${JSON.stringify(pageHTML)});
+                f.contentDocument.write(html);
                 f.contentDocument.close();
                 f.dataset.ptBootWritten = 'yes';
             }`;
-            doc.head.append(writer); writer.remove();
+            try { doc.head.append(writer); }
+            finally { delete frame.__PT_BOOT_HTML__; writer.remove(); }
             recordPageStage('副窗口页面已写入');
             if (frame.dataset.ptBootWritten !== 'yes') throw new Error('宿主阻止了子会话启动脚本。并行面板可用，但此环境暂不能打开并行会话。');
             checkDocument();
@@ -1693,23 +1772,38 @@
     function attachChild(w, id) {
         const s = sessions.get(id);
         if (!s || s.error || s.frame?.contentWindow !== w) return false;
-        if (s.attached) return true;
+        if (s.attached) { s.resumeStartup?.(); return true; }
         if (!w.SillyTavern?.getContext) return false;
         try {
             const c = ctx(w), events = c.eventTypes || c.event_types;
             if (!c.eventSource?.on || !events || typeof c.selectCharacterById !== 'function') return false;
             s.win = w; s.phase = '已找到聊天上下文，等待 APP_READY';
+            const startup = w.__PT_BOOT_TRACE__?.startup;
+            const requiresExtensions = !!startup;
             const ready = () => {
-                // APP_READY may be replayed by hosts/extensions. Reserve before
-                // scheduling so duplicate events cannot race character loading.
                 if (s.openStarted || s.ready || s.error || !sessions.has(id) || disposed) return;
+                s.appReadyReceived ||= startup?.appReady === true;
+                if (!s.extensionsLoaded && startup?.extensionsLoaded === true) {
+                    s.extensionsLoaded = true;
+                    if (iosBrowser) recordPageStage('副窗口扩展加载完成');
+                }
+                if (!(requiresExtensions ? startup?.appReady === true : s.appReadyReceived)) return;
+                if (requiresExtensions && startup?.extensionsEnabled !== false && startup?.extensionsLoaded !== true) {
+                    if (!s.needsConfirmation) {
+                        s.status = '正在等待扩展加载…';
+                        s.phase = '页面已启动，等待第三方扩展加载完成';
+                    }
+                    queueRender();
+                    return;
+                }
+                // Both events can be replayed or observed more than once.
+                // Reserve before scheduling so they cannot race target loading.
                 s.openStarted = true;
-                s.appReadyReceived = true;
                 if (!s.error) s.status = '正在打开角色…';
                 // Keep request diagnostics running through target chat loading.
-                s.phase = 'APP_READY 已触发，正在打开目标角色';
-                // Don't block native APP_READY dispatch with character navigation.
-                host.setTimeout(async () => {
+                s.phase = '宿主启动完成，正在打开目标角色';
+                // Don't block native event dispatch with character navigation.
+                const openTimer = host.setTimeout(async () => {
                     if (!sessions.has(id) || disposed || s.ready || s.error) return;
                     try {
                         const latest = ctx(w);
@@ -1761,14 +1855,22 @@
                         }
                     } catch (error) { failChildSession(s, error, '目标聊天读取失败'); }
                 }, 0);
+                s.cleanups.push(() => host.clearTimeout(openTimer));
             };
+            s.resumeStartup = ready;
+            s.cleanups.push(() => { delete s.resumeStartup; });
+            // Set before subscribing: cached APP_READY may call us synchronously.
+            s.attached = true;
             on(c.eventSource, events.EXTENSION_SETTINGS_LOADED || 'extension_settings_loaded', () => {
-                s.extensionsLoaded = true;
-                if (iosBrowser) recordPageStage('副窗口扩展加载完成');
+                if (!requiresExtensions) s.extensionsLoaded = true;
+                ready();
             }, s);
-            on(c.eventSource, events.APP_INITIALIZED || 'app_initialized', () => { s.appInitializedReceived = true; s.phase = 'APP_INITIALIZED 已触发，等待启动收尾'; }, s);
-            on(c.eventSource, events.APP_READY || 'app_ready', ready, s);
-            s.attached = true; return true;
+            on(c.eventSource, events.APP_INITIALIZED || 'app_initialized', () => {
+                s.appInitializedReceived = true;
+                if (!s.openStarted && !s.ready && !s.appReadyReceived) s.phase = 'APP_INITIALIZED 已触发，等待启动收尾';
+            }, s);
+            on(c.eventSource, events.APP_READY || 'app_ready', () => { s.appReadyReceived = true; ready(); }, s);
+            ready(); return true;
         } catch { s.phase = '聊天上下文尚未可用，等待重试'; return false; }
     }
 
@@ -1870,7 +1972,7 @@
         delete host[KEY]; return true;
     }
     host[KEY] = {
-        version: VERSION, owner, claim: token => { host[KEY].owner = token; disposeRequested = false; },
+        version: VERSION, owner, claim: token => { host[KEY].owner = token; disposeRequested = false; syncRefresh(); },
         show: () => {
             recordPageStage('打开悬浮面板');
             // QR is also a recovery entrance for stale/offscreen mobile coordinates.
@@ -1898,42 +2000,39 @@
         requestDispose: () => {
             disposeRequested = true;
             if (![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) dispose();
-            else notify('脚本已停用，将在现有生成结束后移除并行界面。');
+            else { syncRefresh(); notify('脚本已停用，将在现有生成结束后移除并行界面。'); }
         },
     };
     teardown.push(installTauriRuntimeCompatibility(host));
     attachSession(main);
     const events = ctx(host).eventTypes || ctx(host).event_types;
     on(ctx(host).eventSource, events.APP_READY || 'app_ready', () => { appReady = true; queueRender(); }, main);
-    const refresh = host.setInterval(() => {
+    let refresh = null;
+    const refreshTick = () => {
         if (disposeRequested && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { dispose(); return; }
-        refreshLiveStatus();
-    }, 1000);
-    teardown.push(() => host.clearInterval(refresh));
+        if (doc.visibilityState !== 'hidden') refreshLiveStatus();
+    };
+    function syncRefresh() {
+        // One owner/handle across every background/foreground cycle. Keep only
+        // pending-disposal checks alive while a hidden child is still generating.
+        const needed = !disposed && (doc.visibilityState !== 'hidden' || disposeRequested);
+        if (!needed && refresh !== null) { host.clearInterval(refresh); refresh = null; }
+        else if (needed && refresh === null) refresh = host.setInterval(refreshTick, 1000);
+    }
+    syncRefresh();
+    teardown.push(() => { host.clearInterval(refresh); refresh = null; });
     const unload = event => {
         if ([...sessions.values()].some(isBusy)) { event.preventDefault(); event.returnValue = ''; }
     };
     host.addEventListener('beforeunload', unload);
     const visibilityChanged = () => {
         recordPageStage(doc.visibilityState === 'hidden' ? '页面转入后台' : '页面回到前台');
-        // iOS memory optimization: pause non-critical tasks when backgrounded
-        if (iosBrowser) {
-            if (doc.visibilityState === 'hidden') {
-                // Pause UI updates and reduce polling frequency
-                host.clearInterval(refresh);
-                host.cancelAnimationFrame(sessionLayoutFrame);
-                sessionLayoutFrame = null;
-            } else {
-                // Resume normal operation when foregrounded
-                if (!disposeRequested) {
-                    const resumeRefresh = host.setInterval(() => {
-                        if (disposeRequested && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { dispose(); return; }
-                        refreshLiveStatus();
-                    }, 1000);
-                    teardown.push(() => host.clearInterval(resumeRefresh));
-                }
-                layoutSessions();
-            }
+        syncRefresh();
+        if (doc.visibilityState === 'hidden') {
+            host.cancelAnimationFrame(sessionLayoutFrame); sessionLayoutFrame = null;
+        } else {
+            refreshTick();
+            if (!disposed) { layoutSessions(); queueRender(); }
         }
     };
     doc.addEventListener('visibilitychange', visibilityChanged);
@@ -1946,6 +2045,7 @@
         if (!event.persisted) return;
         currentPageStage = { ...currentPageStage, pageExitObserved: false, pageExitTime: null, persisted: false };
         recordPageStage('页面从缓存恢复');
+        syncRefresh();
     };
     host.addEventListener('pageshow', resumed);
     teardown.push(() => host.removeEventListener('pageshow', resumed));

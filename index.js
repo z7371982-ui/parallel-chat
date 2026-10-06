@@ -40,7 +40,7 @@ async function initialize() {
     root.innerHTML = `
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>并行对话 · 0.5.14</b>
+                <b>并行对话 · 0.5.16</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
@@ -87,9 +87,11 @@ async function initialize() {
     const disposeSettings = () => {
         owner.removeEventListener('pt-extension-settings', sync);
         owner.removeEventListener('pt-night-mode', sync);
+        window.removeEventListener('pagehide', leaving);
     };
+    const leaving = event => { if (!event.persisted) disposeSettings(); };
     window.__PT_SETTINGS_DISPOSE__ = disposeSettings;
-    window.addEventListener('pagehide', disposeSettings, { once: true });
+    window.addEventListener('pagehide', leaving);
     checkbox.addEventListener('change', () => {
         settings.showLauncher = checkbox.checked;
         persist();
