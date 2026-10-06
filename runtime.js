@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.5.20 — Tavern Helper global script.
+/* Parallel Tavern 0.5.17 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.5.20 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.5.17 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -114,8 +114,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.20';
-    let lowGraphicsMode = host.__PT_EXTENSION_CONFIG__?.lowGraphicsMode === true;
+    const VERSION = '0.5.17';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let hostAppVersion = null;
     let cleanupErrors = 0;
@@ -168,7 +167,7 @@
         const entry = { stage, time: Date.now(), sessions: sessions.size };
         pageStages.push(entry);
         if (pageStages.length > 16) pageStages.shift();
-        currentPageStage = { ...currentPageStage, version: VERSION, pageId: diagnosticPageId, ...entry, lowGraphicsMode, visibility: doc.visibilityState, cleanupErrors, mainErrors: { ...mainErrors }, recentStages: [...pageStages] };
+        currentPageStage = { ...currentPageStage, version: VERSION, pageId: diagnosticPageId, ...entry, visibility: doc.visibilityState, cleanupErrors, mainErrors: { ...mainErrors }, recentStages: [...pageStages] };
         if (stage === '切换到副窗口' || stage === '副窗口就绪' || stage === '关闭副窗口' || stage.startsWith('副窗口就绪后') || stage === '副窗口扩展加载完成' || stage === '副窗口执行错误' || stage === '主页面执行错误' || stage === '页面转入后台') {
             currentPageStage.resources = [...sessions.values()].map(session => {
                 try {
@@ -244,51 +243,6 @@
         }
     }
     teardown.push(() => { mainCompositingStyle?.remove(); mainCompositingStyle = null; });
-    // Opt-in local appearance mode. Only native host surfaces are styled:
-    // no descendant wildcard, chat content, embedded script document or timer changes.
-    const lowGraphicsCSS = `html:root > body,
-html:root > body > :is(#bg1, #bg_custom, #sheld, #top-bar, #top-settings-holder),
-html:root > body > #sheld > :is(#chat, #form_sheld),
-html:root > body > #sheld > #form_sheld > #send_form,
-html:root > body > #sheld > #form_sheld > [data-tt-android-ime-lift] > #send_form {
-    background-image: none !important;
-    -webkit-backdrop-filter: none !important; backdrop-filter: none !important;
-    box-shadow: none !important;
-}
-html:root > body > :is(#bg1, #bg_custom) {
-    filter: none !important; will-change: auto !important;
-    animation: none !important; transition: none !important; transform: none !important;
-}`;
-    function applyLowGraphics(d) {
-        if (!d?.head) return;
-        const existing = d.getElementById('pt-low-graphics');
-        if (!lowGraphicsMode) { existing?.remove(); return; }
-        if (existing) return;
-        const reduced = d.createElement('style');
-        reduced.id = 'pt-low-graphics'; reduced.textContent = lowGraphicsCSS;
-        d.head.append(reduced);
-    }
-    function syncChildAppearance(w, id) {
-        const session = sessions.get(id);
-        if (!disposed && session?.frame?.contentWindow === w) applyLowGraphics(w.document);
-    }
-    function setLowGraphicsMode(value) {
-        if (disposed) return;
-        const changed = lowGraphicsMode !== (value === true);
-        lowGraphicsMode = value === true;
-        applyLowGraphics(doc);
-        for (const session of sessions.values()) {
-            try { if (session.frame) applyLowGraphics(session.frame.contentDocument); }
-            catch { /* A navigating/closing child is handled by its lifecycle guard. */ }
-        }
-        if (changed) recordPageStage(lowGraphicsMode ? '开启本机低图形负载模式' : '关闭本机低图形负载模式');
-    }
-    const appearanceSettingsChanged = () => setLowGraphicsMode(host.__PT_EXTENSION_CONFIG__?.lowGraphicsMode === true);
-    host.addEventListener('pt-extension-settings', appearanceSettingsChanged);
-    teardown.push(() => {
-        host.removeEventListener('pt-extension-settings', appearanceSettingsChanged);
-        doc.getElementById('pt-low-graphics')?.remove();
-    });
     // The main chat used to keep painting underneath the full-screen child. Only
     // suppress those covered pixels: visibility preserves sizes, scroll position,
     // iframe browsing contexts and background generation/Helper/MVU execution.
@@ -341,7 +295,6 @@ html:root > body > :is(#bg1, #bg_custom) {
         if (audioContext) void audioContext.close().catch(() => {});
     });
     let enabled = false;
-    let sharedView = null;
     let activeId = 'main';
     let disposed = false;
     let panelOpen = false;
@@ -711,12 +664,10 @@ html:root > body > :is(#bg1, #bg_custom) {
         } catch { /* document may still be loading */ }
     }
     function isGenerating(session) {
-        if (session.sharedTask) return !!session.busy;
         try { return !!(session.busy || session.win.__PT_CORE__?.is_send_press === true); }
         catch { return !!session.busy; }
     }
     function isSaving(session) {
-        if (session.sharedTask) return !!session.saving;
         try { return session.win.__PT_CORE__?.isChatSaving === true; }
         catch { return false; }
     }
@@ -801,7 +752,6 @@ html:root > body > :is(#bg1, #bg_custom) {
     let cancelReadingRestore = () => {};
     teardown.push(() => cancelReadingRestore());
     function setActive(id) {
-        if (sharedView?.active) { void sharedView.activate(id).catch(() => notify('共享会话切换未完成，请检查当前聊天。')); return; }
         lastAction = { action: 'view-session', session: id, time: new Date().toISOString() };
         if (!sessions.has(id)) return;
         if (!sessions.get(id).ready && !sessions.get(id).needsConfirmation) {
@@ -832,20 +782,19 @@ html:root > body > :is(#bg1, #bg_custom) {
     }
     panel.addEventListener('cancel', e => { e.preventDefault(); panelOpen = false; pickerOpen = false; render(); });
     function updateLauncher() {
-        const parallelEnabled = enabled || !!sharedView?.active;
-        const all = sharedView?.active ? sharedView.sessions() : [...sessions.values()];
+        const all = [...sessions.values()];
         const running = all.filter(isGenerating).length;
-        const completed = parallelEnabled ? all.filter(s => s.unreadCompletion) : [];
+        const completed = enabled ? all.filter(s => s.unreadCompletion) : [];
         launcher.dataset.completed = String(completed.length);
-        const signature = JSON.stringify([parallelEnabled, running, completed.length, all.map(s => [s.title, s.avatar])]);
+        const signature = JSON.stringify([enabled, running, completed.length, all.map(s => [s.title, s.avatar])]);
         if (signature !== launcherSignature) {
             launcherSignature = signature;
             const dock = element('span', 'pt-dock'), faces = element('span', 'pt-dock-faces');
-            for (const s of (parallelEnabled ? all : [main])) {
+            for (const s of (enabled ? all : [main])) {
                 const face = portrait(s); face.dataset.ptSession = s.id; faces.append(face);
             }
             const label = element('span', 'pt-dock-label', completed.length ? `${completed.length} 个已完成` : '并行会话');
-            label.append(element('span', 'pt-dock-note', parallelEnabled ? (running ? `${running} 个正在回复` : '点开查看会话') : '点击开启'));
+            label.append(element('span', 'pt-dock-note', enabled ? (running ? `${running} 个正在回复` : '点开查看会话') : '点击开启'));
             dock.append(faces, label);
             launcher.replaceChildren(dock);
         }
@@ -885,7 +834,6 @@ html:root > body > :is(#bg1, #bg_custom) {
         if (!completionBadge.hidden) { setFloating(completionBadge, false); setFloating(completionBadge, true); positionCompletionBadge(); }
         if (!panelOpen) panel.style.removeProperty('display');
         if (!panelOpen) return;
-        if (sharedView?.active) { sharedView.render(panel); return; }
         if (pickerOpen) {
             if (picker.parentNode !== panel) panel.replaceChildren(picker);
             return; // Preserve the search input and focus during status refreshes.
@@ -962,7 +910,6 @@ html:root > body > :is(#bg1, #bg_custom) {
     function refreshLiveStatus() {
         if (pointerActive) return;
         updateLauncher();
-        if (sharedView?.active) return;
         if (!panelOpen || pickerOpen) return;
         for (const card of panel.querySelectorAll('.pt-card[data-session]')) {
             const session = sessions.get(card.dataset.session);
@@ -1481,8 +1428,6 @@ html:root > body > :is(#bg1, #bg_custom) {
             window.addEventListener('pagehide', leaving);
         };
         window.__PT_CHILD_ID__ = id;
-        // Use the live parent setting before any host/extension startup scripts.
-        parentHost.__PARALLEL_TAVERN_V2__?.syncChildAppearance(window, id);
         if (typeof installRuntimeCompatibility === 'function') {
             const dispose = installRuntimeCompatibility(window);
             window.__PT_RUNTIME_COMPAT_DISPOSE__ = dispose;
@@ -2181,7 +2126,7 @@ html:root > body > :is(#bg1, #bg_custom) {
     }
     function diagnostics() {
         return {
-            script: 'Parallel Tavern', version: VERSION, lowGraphicsMode, sharedMode: !!sharedView?.active,
+            script: 'Parallel Tavern', version: VERSION,
             host: host.__TAURITAVERN__ || host.__TAURI_RUNNING__ ? 'TauriTavern' : 'SillyTavern / browser',
             platformABI: host.__TAURITAVERN__?.abiVersion ?? null,
             hostAppVersion, cleanupErrors, mainErrors: { ...mainErrors },
@@ -2220,8 +2165,6 @@ html:root > body > :is(#bg1, #bg_custom) {
         render(); await copy();
     }
     function dispose() {
-        if (sharedView?.busy() || (sharedView && sharedView.dispose() === false)) { notify('请先处理共享任务及未保存的回复，再卸载。'); return false; }
-        sharedView = null;
         if ([...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { notify('子会话仍在运行，请先停止或等待完成再卸载。'); return false; }
         disposed = true;
         for (const s of sessions.values()) {
@@ -2252,18 +2195,8 @@ html:root > body > :is(#bg1, #bg_custom) {
                     if (panel.getBoundingClientRect().height < 20) host.alert(`并行对话 v${VERSION}：脚本已启动，但手机界面被隐藏。请反馈 TT 版本和手机系统。\n${host.navigator.userAgent}`);
                 }
             });
-        }, attachChild, reportChild, diagnostics, dispose, syncChildAppearance, setLowGraphicsMode,
+        }, attachChild, reportChild, diagnostics, dispose,
         setNightMode,
-        setSharedView: view => {
-            if (disposed || (view && (sessions.size !== 1 || [...sessions.values()].some(isBusy)))) return false;
-            sharedView = view;
-            if (view) { enabled = false; pickerOpen = false; }
-            launcherSignature = ''; badgeSignature = ''; render(); return true;
-        },
-        registerSharedManager: manager => { if (!disposed) teardown.push(() => manager.dispose()); },
-        refreshSharedView: queueRender,
-        hideSharedPanel: () => { panelOpen = false; pickerOpen = false; render(); },
-        notifyShared: notify,
         getActiveWindow: () => sessions.get(activeId)?.win || host,
         setLauncherVisible: value => {
             launcherVisible = value !== false;
@@ -2272,18 +2205,17 @@ html:root > body > :is(#bg1, #bg_custom) {
         },
         requestDispose: () => {
             disposeRequested = true;
-            if (!sharedView?.busy() && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) dispose();
+            if (![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) dispose();
             else { syncRefresh(); notify('脚本已停用，将在现有生成结束后移除并行界面。'); }
         },
     };
-    applyLowGraphics(doc);
     teardown.push(installTauriRuntimeCompatibility(host));
     attachSession(main);
     const events = ctx(host).eventTypes || ctx(host).event_types;
     on(ctx(host).eventSource, events.APP_READY || 'app_ready', () => { appReady = true; queueRender(); }, main);
     let refresh = null;
     const refreshTick = () => {
-        if (disposeRequested && !sharedView?.busy() && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { dispose(); return; }
+        if (disposeRequested && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { dispose(); return; }
         if (doc.visibilityState !== 'hidden') refreshLiveStatus();
     };
     function syncRefresh() {
@@ -2296,7 +2228,7 @@ html:root > body > :is(#bg1, #bg_custom) {
     syncRefresh();
     teardown.push(() => { host.clearInterval(refresh); refresh = null; });
     const unload = event => {
-        if (sharedView?.busy() || [...sessions.values()].some(isBusy)) { event.preventDefault(); event.returnValue = ''; }
+        if ([...sessions.values()].some(isBusy)) { event.preventDefault(); event.returnValue = ''; }
     };
     host.addEventListener('beforeunload', unload);
     const visibilityChanged = () => {
