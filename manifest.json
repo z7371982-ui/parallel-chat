@@ -1,10 +1,11 @@
 {
   "display_name": "并行对话",
   "loading_order": 100,
+  "generate_interceptor": "parallelChatSharedGenerationGuard",
   "requires": [],
   "optional": [],
   "js": "index.js",
   "author": "Parallel Tavern",
-  "version": "0.5.16",
+  "version": "0.5.19",
   "auto_update": false
 }

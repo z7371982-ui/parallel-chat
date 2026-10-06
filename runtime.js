@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.5.16 — Tavern Helper global script.
+/* Parallel Tavern 0.5.19 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.5.16 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.5.19 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -114,7 +114,8 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.16';
+    const VERSION = '0.5.19';
+    let lowGraphicsMode = host.__PT_EXTENSION_CONFIG__?.lowGraphicsMode === true;
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let hostAppVersion = null;
     let cleanupErrors = 0;
@@ -167,7 +168,7 @@
         const entry = { stage, time: Date.now(), sessions: sessions.size };
         pageStages.push(entry);
         if (pageStages.length > 16) pageStages.shift();
-        currentPageStage = { ...currentPageStage, version: VERSION, pageId: diagnosticPageId, ...entry, visibility: doc.visibilityState, cleanupErrors, mainErrors: { ...mainErrors }, recentStages: [...pageStages] };
+        currentPageStage = { ...currentPageStage, version: VERSION, pageId: diagnosticPageId, ...entry, lowGraphicsMode, visibility: doc.visibilityState, cleanupErrors, mainErrors: { ...mainErrors }, recentStages: [...pageStages] };
         if (stage === '切换到副窗口' || stage === '副窗口就绪' || stage === '关闭副窗口' || stage.startsWith('副窗口就绪后') || stage === '副窗口扩展加载完成' || stage === '副窗口执行错误' || stage === '主页面执行错误' || stage === '页面转入后台') {
             currentPageStage.resources = [...sessions.values()].map(session => {
                 try {
@@ -243,6 +244,51 @@
         }
     }
     teardown.push(() => { mainCompositingStyle?.remove(); mainCompositingStyle = null; });
+    // Opt-in local appearance mode. Only native host surfaces are styled:
+    // no descendant wildcard, chat content, embedded script document or timer changes.
+    const lowGraphicsCSS = `html:root > body,
+html:root > body > :is(#bg1, #bg_custom, #sheld, #top-bar, #top-settings-holder),
+html:root > body > #sheld > :is(#chat, #form_sheld),
+html:root > body > #sheld > #form_sheld > #send_form,
+html:root > body > #sheld > #form_sheld > [data-tt-android-ime-lift] > #send_form {
+    background-image: none !important;
+    -webkit-backdrop-filter: none !important; backdrop-filter: none !important;
+    box-shadow: none !important;
+}
+html:root > body > :is(#bg1, #bg_custom) {
+    filter: none !important; will-change: auto !important;
+    animation: none !important; transition: none !important; transform: none !important;
+}`;
+    function applyLowGraphics(d) {
+        if (!d?.head) return;
+        const existing = d.getElementById('pt-low-graphics');
+        if (!lowGraphicsMode) { existing?.remove(); return; }
+        if (existing) return;
+        const reduced = d.createElement('style');
+        reduced.id = 'pt-low-graphics'; reduced.textContent = lowGraphicsCSS;
+        d.head.append(reduced);
+    }
+    function syncChildAppearance(w, id) {
+        const session = sessions.get(id);
+        if (!disposed && session?.frame?.contentWindow === w) applyLowGraphics(w.document);
+    }
+    function setLowGraphicsMode(value) {
+        if (disposed) return;
+        const changed = lowGraphicsMode !== (value === true);
+        lowGraphicsMode = value === true;
+        applyLowGraphics(doc);
+        for (const session of sessions.values()) {
+            try { if (session.frame) applyLowGraphics(session.frame.contentDocument); }
+            catch { /* A navigating/closing child is handled by its lifecycle guard. */ }
+        }
+        if (changed) recordPageStage(lowGraphicsMode ? '开启本机低图形负载模式' : '关闭本机低图形负载模式');
+    }
+    const appearanceSettingsChanged = () => setLowGraphicsMode(host.__PT_EXTENSION_CONFIG__?.lowGraphicsMode === true);
+    host.addEventListener('pt-extension-settings', appearanceSettingsChanged);
+    teardown.push(() => {
+        host.removeEventListener('pt-extension-settings', appearanceSettingsChanged);
+        doc.getElementById('pt-low-graphics')?.remove();
+    });
     // The main chat used to keep painting underneath the full-screen child. Only
     // suppress those covered pixels: visibility preserves sizes, scroll position,
     // iframe browsing contexts and background generation/Helper/MVU execution.
@@ -295,6 +341,7 @@
         if (audioContext) void audioContext.close().catch(() => {});
     });
     let enabled = false;
+    let sharedView = null;
     let activeId = 'main';
     let disposed = false;
     let panelOpen = false;
@@ -303,7 +350,6 @@
     let controlsId = null;
     let launcherSignature = '';
     let badgeSignature = '';
-    let appHTML = null;
     let renderPending = false;
     let pointerActive = false;
     let lastAction = null;
@@ -665,10 +711,12 @@
         } catch { /* document may still be loading */ }
     }
     function isGenerating(session) {
+        if (session.sharedTask) return !!session.busy;
         try { return !!(session.busy || session.win.__PT_CORE__?.is_send_press === true); }
         catch { return !!session.busy; }
     }
     function isSaving(session) {
+        if (session.sharedTask) return !!session.saving;
         try { return session.win.__PT_CORE__?.isChatSaving === true; }
         catch { return false; }
     }
@@ -753,6 +801,7 @@
     let cancelReadingRestore = () => {};
     teardown.push(() => cancelReadingRestore());
     function setActive(id) {
+        if (sharedView?.active) { void sharedView.activate(id).catch(() => notify('共享会话切换未完成，请检查当前聊天。')); return; }
         lastAction = { action: 'view-session', session: id, time: new Date().toISOString() };
         if (!sessions.has(id)) return;
         if (!sessions.get(id).ready && !sessions.get(id).needsConfirmation) {
@@ -783,19 +832,20 @@
     }
     panel.addEventListener('cancel', e => { e.preventDefault(); panelOpen = false; pickerOpen = false; render(); });
     function updateLauncher() {
-        const all = [...sessions.values()];
+        const parallelEnabled = enabled || !!sharedView?.active;
+        const all = sharedView?.active ? sharedView.sessions() : [...sessions.values()];
         const running = all.filter(isGenerating).length;
-        const completed = enabled ? all.filter(s => s.unreadCompletion) : [];
+        const completed = parallelEnabled ? all.filter(s => s.unreadCompletion) : [];
         launcher.dataset.completed = String(completed.length);
-        const signature = JSON.stringify([enabled, running, completed.length, all.map(s => [s.title, s.avatar])]);
+        const signature = JSON.stringify([parallelEnabled, running, completed.length, all.map(s => [s.title, s.avatar])]);
         if (signature !== launcherSignature) {
             launcherSignature = signature;
             const dock = element('span', 'pt-dock'), faces = element('span', 'pt-dock-faces');
-            for (const s of (enabled ? all : [main])) {
+            for (const s of (parallelEnabled ? all : [main])) {
                 const face = portrait(s); face.dataset.ptSession = s.id; faces.append(face);
             }
             const label = element('span', 'pt-dock-label', completed.length ? `${completed.length} 个已完成` : '并行会话');
-            label.append(element('span', 'pt-dock-note', enabled ? (running ? `${running} 个正在回复` : '点开查看会话') : '点击开启'));
+            label.append(element('span', 'pt-dock-note', parallelEnabled ? (running ? `${running} 个正在回复` : '点开查看会话') : '点击开启'));
             dock.append(faces, label);
             launcher.replaceChildren(dock);
         }
@@ -835,6 +885,7 @@
         if (!completionBadge.hidden) { setFloating(completionBadge, false); setFloating(completionBadge, true); positionCompletionBadge(); }
         if (!panelOpen) panel.style.removeProperty('display');
         if (!panelOpen) return;
+        if (sharedView?.active) { sharedView.render(panel); return; }
         if (pickerOpen) {
             if (picker.parentNode !== panel) panel.replaceChildren(picker);
             return; // Preserve the search input and focus during status refreshes.
@@ -911,6 +962,7 @@
     function refreshLiveStatus() {
         if (pointerActive) return;
         updateLauncher();
+        if (sharedView?.active) return;
         if (!panelOpen || pickerOpen) return;
         for (const card of panel.querySelectorAll('.pt-card[data-session]')) {
             const session = sessions.get(card.dataset.session);
@@ -1090,16 +1142,15 @@
         enabled = false; setActive('main'); panelOpen = true; render();
     }
 
-    async function loadHTML() {
-        if (!appHTML) appHTML = (async () => {
-            const url = new URL(host.location.href); url.hash = ''; url.search = '';
-            const res = await host.fetch(url.href, { credentials: 'same-origin' });
-            if (!res.ok) throw new Error(`无法读取酒馆页面（HTTP ${res.status}）`);
-            const html = await res.text();
-            if (!/<html[\s>]/i.test(html) || !/script/i.test(html)) throw new Error('宿主没有返回酒馆页面 HTML');
-            return html;
-        })().catch(error => { appHTML = null; throw error; });
-        return appHTML;
+    async function loadHTML(signal) {
+        // The browser owns the HTTP cache. Do not also retain a resolved promise
+        // containing the entire page for the lifetime of the parallel controller.
+        const url = new URL(host.location.href); url.hash = ''; url.search = '';
+        const res = await host.fetch(url.href, { credentials: 'same-origin', signal });
+        if (!res.ok) throw new Error(`无法读取酒馆页面（HTTP ${res.status}）`);
+        const html = await res.text();
+        if (!/<html[\s>]/i.test(html) || !/script/i.test(html)) throw new Error('宿主没有返回酒馆页面 HTML');
+        return html;
     }
 
     // This prelude executes BEFORE native scripts in each child document. It uses the
@@ -1280,7 +1331,146 @@
         notify();
     }
 
-    function childPrelude(id, avatar, baseURL, protectExisting, installRuntimeCompatibility) {
+    /**
+     * Rewrite only the effective top-level settings envelope in a bootstrap JSON body.
+     * The common path validates JSON grammar without constructing the character library.
+     * Deep input or a missing envelope uses the original parse/transform/stringify path.
+     * No transform is invoked until the complete input has been validated.
+     */
+    function isolateBootstrapJSON(text, transform) {
+        if (typeof text !== 'string') throw new TypeError('Bootstrap JSON must be a string');
+        if (typeof transform !== 'function') throw new TypeError('Settings transform must be a function');
+        const fallback = {};
+        const maxDepth = 128;
+        let position = 0;
+        let settingsStart = -1;
+        let settingsEnd = -1;
+        const invalid = () => { throw new SyntaxError(`Invalid bootstrap JSON at position ${position}`); };
+        const whitespace = () => {
+            while (position < text.length) {
+                const code = text.charCodeAt(position);
+                if (code !== 32 && code !== 9 && code !== 10 && code !== 13) break;
+                position++;
+            }
+        };
+        const digit = code => code >= 48 && code <= 57;
+        const string = () => {
+            if (text.charCodeAt(position++) !== 34) invalid();
+            while (position < text.length) {
+                const code = text.charCodeAt(position++);
+                if (code === 34) return;
+                if (code < 32) invalid();
+                if (code !== 92) continue;
+                const escaped = text.charCodeAt(position++);
+                if (escaped === 117) {
+                    for (let count = 0; count < 4; count++) {
+                        const hex = text.charCodeAt(position++);
+                        if (!digit(hex) && !(hex >= 65 && hex <= 70) && !(hex >= 97 && hex <= 102)) invalid();
+                    }
+                } else if (![34, 92, 47, 98, 102, 110, 114, 116].includes(escaped)) invalid();
+            }
+            invalid();
+        };
+        const number = () => {
+            const numberStart = position;
+            if (text.charCodeAt(position) === 45) position++;
+            const first = text.charCodeAt(position);
+            if (first === 48) position++;
+            else if (first >= 49 && first <= 57) {
+                do { position++; } while (digit(text.charCodeAt(position)));
+            } else invalid();
+            if (text.charCodeAt(position) === 46) {
+                position++;
+                if (!digit(text.charCodeAt(position))) invalid();
+                do { position++; } while (digit(text.charCodeAt(position)));
+            }
+            const exponent = text.charCodeAt(position);
+            if (exponent === 69 || exponent === 101) {
+                position++;
+                const sign = text.charCodeAt(position);
+                if (sign === 43 || sign === 45) position++;
+                if (!digit(text.charCodeAt(position))) invalid();
+                do { position++; } while (digit(text.charCodeAt(position)));
+            }
+            // The old whole-payload stringify normalizes negative zero and Infinity.
+            // Preserve that behavior rather than changing unrelated numeric values.
+            if (first === 48 || exponent === 69 || exponent === 101 || position - numberStart > 308) {
+                const numeric = Number(text.slice(numberStart, position));
+                if (!Number.isFinite(numeric) || Object.is(numeric, -0)) throw fallback;
+            }
+        };
+        const value = depth => {
+            if (depth > maxDepth) throw fallback;
+            const start = text.charCodeAt(position);
+            if (start === 34) { string(); return; }
+            if (start === 123) {
+                position++; whitespace();
+                if (text.charCodeAt(position) === 125) { position++; return; }
+                while (true) {
+                    const keyStart = position;
+                    string();
+                    const keyEnd = position;
+                    whitespace();
+                    if (text.charCodeAt(position++) !== 58) invalid();
+                    whitespace();
+                    const memberStart = position;
+                    value(depth + 1);
+                    if (depth === 0 && JSON.parse(text.slice(keyStart, keyEnd)) === 'settings') {
+                        // JSON.parse uses the last duplicate key, including escaped keys.
+                        settingsStart = memberStart; settingsEnd = position;
+                    }
+                    whitespace();
+                    const separator = text.charCodeAt(position++);
+                    if (separator === 125) return;
+                    if (separator !== 44) invalid();
+                    whitespace();
+                }
+            }
+            if (start === 91) {
+                position++; whitespace();
+                if (text.charCodeAt(position) === 93) { position++; return; }
+                while (true) {
+                    value(depth + 1); whitespace();
+                    const separator = text.charCodeAt(position++);
+                    if (separator === 93) return;
+                    if (separator !== 44) invalid();
+                    whitespace();
+                }
+            }
+            for (const literal of ['true', 'false', 'null']) {
+                if (text.startsWith(literal, position)) { position += literal.length; return; }
+            }
+            number();
+        };
+        const legacy = () => {
+            const payload = JSON.parse(text);
+            if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new TypeError('Bootstrap payload must be an object');
+            payload.settings = transform(payload.settings);
+            return JSON.stringify(payload);
+        };
+        whitespace();
+        if (text.charCodeAt(position) !== 123) return legacy();
+        try {
+            value(0); whitespace();
+            if (position !== text.length) invalid();
+        } catch (error) {
+            if (error === fallback) return legacy();
+            throw error;
+        }
+        if (settingsStart < 0) return legacy();
+        const transformed = transform(JSON.parse(text.slice(settingsStart, settingsEnd)));
+        // Preserve JSON.stringify's toJSON key ('settings'), omission, and error behavior.
+        const envelope = JSON.stringify({ settings: transformed });
+        if (envelope === '{}') {
+            const payload = JSON.parse(text);
+            delete payload.settings;
+            return JSON.stringify(payload);
+        }
+        const replacement = envelope.slice('{"settings":'.length, -1);
+        return text.slice(0, settingsStart) + replacement + text.slice(settingsEnd);
+    }
+
+    function childPrelude(id, avatar, baseURL, protectExisting, installRuntimeCompatibility, rewriteBootstrapJSON) {
         const parentHost = window.parent;
         const onFinalPageHide = cleanup => {
             const leaving = event => {
@@ -1291,6 +1481,8 @@
             window.addEventListener('pagehide', leaving);
         };
         window.__PT_CHILD_ID__ = id;
+        // Use the live parent setting before any host/extension startup scripts.
+        parentHost.__PARALLEL_TAVERN_V2__?.syncChildAppearance(window, id);
         if (typeof installRuntimeCompatibility === 'function') {
             const dispose = installRuntimeCompatibility(window);
             window.__PT_RUNTIME_COMPAT_DISPOSE__ = dispose;
@@ -1497,7 +1689,9 @@
             // The host may catch a failed startup fetch without APP_READY or
             // unhandledrejection. Report our own fatal validation explicitly.
             report('副窗口启动数据无效', { kind: 'BOOT_DATA_INVALID' });
-            return new Error(message);
+            const error = new Error(message);
+            error.ptBootDataInvalid = true;
+            return error;
         };
         const readStartupJSON = async response => {
             try { return await response.json(); }
@@ -1561,10 +1755,18 @@
             if (local && url.pathname.endsWith('/api/bootstrap') && response.ok) {
                 // Isolate startup settings while preserving the host's character
                 // library and other data used by third-party extensions.
-                const payload = await readStartupJSON(response);
-                if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw bootDataError('启动数据返回异常，已停止副窗口。');
-                payload.settings = isolateSettingsPayload(payload.settings);
-                return new Response(JSON.stringify(payload), { status: response.status, headers: { 'Content-Type': 'application/json' } });
+                let isolated;
+                try {
+                    const text = await response.text();
+                    trace.startup.bootstrapChars = text.length;
+                    // Preserve the character library as JSON text. Only settings
+                    // need a temporary object graph before the host consumes it.
+                    isolated = rewriteBootstrapJSON(text, isolateSettingsPayload);
+                } catch (error) {
+                    if (error?.ptBootDataInvalid) throw error;
+                    throw bootDataError('启动数据无法解析，已停止并释放副窗口。');
+                }
+                return new Response(isolated, { status: response.status, headers: { 'Content-Type': 'application/json' } });
             }
             if (local && url.pathname.endsWith('/api/settings/get') && response.ok) {
                 // This response is replaced, so consume it once. clone() tees
@@ -1577,11 +1779,8 @@
         // Keep settings isolation when the host installs its supported fetch patch.
         let settingsFetch = wrapFetch(isTT ? parentHost.fetch.bind(parentHost) : originalFetch);
         Object.defineProperty(window, 'fetch', { configurable: true, get: () => settingsFetch, set: next => { if (next !== settingsFetch) settingsFetch = wrapFetch(next); } });
-        const timer = setInterval(() => {
-            if (!window.SillyTavern?.getContext) return;
-            if (parentHost.__PARALLEL_TAVERN_V2__?.attachChild(window, id)) clearInterval(timer);
-        }, 50);
-        onFinalPageHide(() => clearInterval(timer));
+        // Startup events notify the parent directly. Its cancellable watcher is
+        // the fallback; do not run a second polling loop in every child realm.
     }
 
     function configureChildImageLoading(parsed) {
@@ -1593,6 +1792,73 @@
             if (!img.hasAttribute('loading')) img.setAttribute('loading', 'lazy');
             if (!img.hasAttribute('decoding')) img.setAttribute('decoding', 'async');
         }
+    }
+
+    async function selectChildHistory(character, avatar, targetChat, signal) {
+        const response = await host.fetch(new URL('api/characters/chats', host.location.href).href, {
+            method: 'POST', headers: ctx(host).getRequestHeaders(),
+            body: JSON.stringify({ avatar_url: avatar, ch_name: character.name }), signal,
+        });
+        if (!response.ok) throw new Error('无法确认历史聊天，已停止打开副窗口，以免误建新档。');
+        const history = await response.json();
+        if (!history || typeof history !== 'object' || history.error) throw new Error('聊天列表返回异常，已停止打开副窗口。');
+        const fileName = chat => chat.file_name.replace(/\.jsonl$/i, '');
+        const historyTime = chat => {
+            const raw = String(chat.last_mes || '');
+            const match = raw.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/)
+                || chat.file_name.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/);
+            return chatTimestamp(chat.last_mes) || (match ? Date.parse(match[1] + 'T' + match[2] + ':' + match[3] + ':' + match[4]) : 0) || 0;
+        };
+        let chosen = null, latestTime = -Infinity;
+        // Keep the first item on equal timestamps, matching the previous stable sort.
+        // Validate every entry before allowing a new chat, without copying/sorting lists.
+        for (const chat of Object.values(history)) {
+            if (!chat || typeof chat.file_name !== 'string') throw new Error('无法识别聊天列表，已停止打开，未创建新档。');
+            if (targetChat) {
+                if (!chosen && fileName(chat) === targetChat) chosen = chat;
+            } else {
+                const time = historyTime(chat);
+                if (!chosen || time > latestTime) { chosen = chat; latestTime = time; }
+            }
+        }
+        if (targetChat && !chosen) throw new Error('指定聊天已不在历史列表中，已停止打开，未创建新档。');
+        return { targetChat: chosen ? fileName(chosen) : null,
+            existingHistory: !!chosen, expectedMessages: Number(chosen?.chat_items) || 0 };
+    }
+
+    async function prepareChildPage(s, avatar) {
+        const html = await loadHTML(s.abort.signal);
+        if (disposed || sessions.get(s.id) !== s || s.error || s.abort.signal.aborted) return null;
+        s.phase = 'HTML 已读取，准备子页面';
+        // This temporary document stays in a separate preparation scope. Session
+        // listeners must not retain it while the real host and extensions start.
+        const parsed = new host.DOMParser().parseFromString(html, 'text/html');
+        configureChildImageLoading(parsed);
+        s.sourceInput = { count: parsed.querySelectorAll('#send_textarea').length,
+            tag: parsed.querySelector('#send_textarea')?.tagName || null };
+        if (s.sourceInput.count !== 1 || s.sourceInput.tag !== 'TEXTAREA') {
+            throw new Error('读取的宿主页面缺少唯一的聊天输入框，已停止启动副窗口。请复制诊断。');
+        }
+        parsed.querySelectorAll('base').forEach(n => n.remove());
+        const base = parsed.createElement('base'); base.href = host.location.href;
+        const bootstrap = parsed.createElement('script');
+        bootstrap.textContent = `(${childPrelude.toString()})(${JSON.stringify(s.id)},${JSON.stringify(avatar)},${JSON.stringify(host.location.href)},${s.existingHistory},${installTauriRuntimeCompatibility.toString()},${isolateBootstrapJSON.toString()});`.replace(/<\/script/gi, '<\\/script');
+        {
+            const startupEvents = parsed.createElement('script');
+            startupEvents.type = 'module'; startupEvents.id = 'pt-startup-events';
+            // A static import, not an asynchronous import/poll: execute before
+            // the host entry even when extension completion precedes APP_READY.
+            startupEvents.textContent = `import { eventSource, event_types } from ${JSON.stringify(new URL('scripts/events.js', host.location.href).href)}; (${observeChildStartupEvents.toString()})(eventSource, event_types);`;
+            parsed.head.prepend(startupEvents);
+        }
+        parsed.head.prepend(bootstrap); parsed.head.prepend(base);
+        if (iosBrowser) {
+            const reduced = parsed.createElement('style'); reduced.id = 'pt-ios-compositing';
+            reduced.textContent = iosCompositingCSS;
+            // Present before the first render; no repeated DOM/style polling.
+            parsed.head.append(reduced);
+        }
+        return '<!DOCTYPE html>\n' + parsed.documentElement.outerHTML;
     }
 
     async function openCharacter(avatar, chatName = null) {
@@ -1616,62 +1882,18 @@
         recordPageStage('开始打开副窗口');
         try {
             s.phase = '确认已有聊天记录';
-            const historyResponse = await host.fetch(new URL('api/characters/chats', host.location.href).href, {
-                method: 'POST', headers: ctx(host).getRequestHeaders(), body: JSON.stringify({ avatar_url: avatar, ch_name: character.name }),
-                signal: s.abort.signal,
-            });
-            if (!historyResponse.ok) throw new Error('无法确认历史聊天，已停止打开副窗口，以免误建新档。');
-            const history = await historyResponse.json();
-            if (!sessions.has(id) || disposed) return;
-            if (!history || typeof history !== 'object' || history.error) throw new Error('聊天列表返回异常，已停止打开副窗口。');
-            const chats = Object.values(history).filter(c => c && typeof c.file_name === 'string');
-            if (Object.values(history).length !== chats.length) throw new Error('无法识别聊天列表，已停止打开，未创建新档。');
-            const fileName = c => c.file_name.replace(/\.jsonl$/i, '');
-            if (targetChat && !chats.some(c => fileName(c) === targetChat)) throw new Error('指定聊天已不在历史列表中，已停止打开，未创建新档。');
-            const historyTime = chat => {
-                const raw = String(chat.last_mes || '');
-                const match = raw.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/)
-                    || chat.file_name.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/);
-                return chatTimestamp(chat.last_mes) || (match ? Date.parse(`${match[1]}T${match[2]}:${match[3]}:${match[4]}`) : 0) || 0;
-            };
-            const latest = [...chats].sort((a, b) => historyTime(b) - historyTime(a));
-            const chosen = targetChat ? chats.find(c => fileName(c) === targetChat)
-                : latest[0];
-            s.targetChat = chosen ? fileName(chosen) : null;
-            s.existingHistory = !!chosen;
-            s.expectedMessages = Number(chosen?.chat_items) || 0;
+            Object.assign(s, await selectChildHistory(character, avatar, targetChat, s.abort.signal));
+            if (disposed || sessions.get(id) !== s || s.abort.signal.aborted) return;
             s.phase = '读取宿主 HTML';
             recordPageStage('读取副窗口页面');
-            const html = await loadHTML();
-            s.phase = 'HTML 已读取，准备子页面';
-            if (!sessions.has(id) || disposed) return;
-            const parsed = new host.DOMParser().parseFromString(html, 'text/html');
-            configureChildImageLoading(parsed);
-            s.sourceInput = { count: parsed.querySelectorAll('#send_textarea').length,
-                tag: parsed.querySelector('#send_textarea')?.tagName || null };
-            if (s.sourceInput.count !== 1 || s.sourceInput.tag !== 'TEXTAREA') {
-                appHTML = null;
-                throw new Error('读取的宿主页面缺少唯一的聊天输入框，已停止启动副窗口。请复制诊断。');
-            }
-            parsed.querySelectorAll('base').forEach(n => n.remove());
-            const base = parsed.createElement('base'); base.href = host.location.href;
-            const bootstrap = parsed.createElement('script');
-            bootstrap.textContent = `(${childPrelude.toString()})(${JSON.stringify(id)},${JSON.stringify(avatar)},${JSON.stringify(host.location.href)},${s.existingHistory},${installTauriRuntimeCompatibility.toString()});`.replace(/<\/script/gi, '<\\/script');
-            {
-                const startupEvents = parsed.createElement('script');
-                startupEvents.type = 'module'; startupEvents.id = 'pt-startup-events';
-                // A static import, not an asynchronous import/poll: execute before
-                // the host entry even when extension completion precedes APP_READY.
-                startupEvents.textContent = `import { eventSource, event_types } from ${JSON.stringify(new URL('scripts/events.js', host.location.href).href)}; (${observeChildStartupEvents.toString()})(eventSource, event_types);`;
-                parsed.head.prepend(startupEvents);
-            }
-            parsed.head.prepend(bootstrap); parsed.head.prepend(base);
-            if (iosBrowser) {
-                const reduced = parsed.createElement('style'); reduced.id = 'pt-ios-compositing';
-                reduced.textContent = iosCompositingCSS;
-                // Present before the first render; no repeated DOM/style polling.
-                parsed.head.append(reduced);
-            }
+            let bootHTML = await prepareChildPage(s, avatar);
+            if (disposed || sessions.get(id) !== s || s.error || s.abort.signal.aborted) return;
+            recordPageStage('副窗口 HTML 已准备');
+            // Leave the temporary parser/history scope before booting another full
+            // host. Yield once so the browser can paint and reclaim eligible data;
+            // document.open/write/close below remain one synchronous operation.
+            await new Promise(resolve => host.setTimeout(resolve, 0));
+            if (disposed || sessions.get(id) !== s || s.error || s.abort.signal.aborted) return;
             const frame = element('iframe', 'pt-frame pt-hidden'); frame.title = `并行角色：${character.name}`;
             frame.name = `pt-${id}`; frame.id = `pt-frame-${id}`;
             frame.dataset.ptSessionId = id;
@@ -1710,7 +1932,8 @@
             // old writer escaped and compiled the entire host HTML again before
             // the browser could parse it as HTML, increasing startup allocations.
             Object.defineProperty(frame, '__PT_BOOT_HTML__', { configurable: true,
-                value: '<!DOCTYPE html>\n' + parsed.documentElement.outerHTML });
+                value: bootHTML });
+            bootHTML = null;
             // Only the child document boot requires a script in the host realm.
             // The launcher and script button no longer depend on inline injection.
             writer.textContent = `{
@@ -1728,22 +1951,56 @@
             if (frame.dataset.ptBootWritten !== 'yes') throw new Error('宿主阻止了子会话启动脚本。并行面板可用，但此环境暂不能打开并行会话。');
             checkDocument();
             if (s.error || !sessions.has(id) || disposed) return;
-            const watch = host.setInterval(() => {
-                if (s.ready || s.error || !sessions.has(id) || disposed) { host.clearInterval(watch); return; }
-                try { attachChild(frame.contentWindow, id); revealStartupPopup(s); } catch {}
-            }, 250);
-            s.cleanups.push(() => host.clearInterval(watch));
+            watchChildStartup(s);
             armLoadWarning(s);
         } catch (error) {
             failChildSession(s, error);
         }
     }
 
+    function watchChildStartup(s) {
+        let timer = null, stopped = false;
+        const live = () => !disposed && sessions.get(s.id) === s && !s.ready && !s.error && !s.abort?.signal.aborted;
+        const stop = () => {
+            stopped = true;
+            host.clearTimeout(timer); timer = null;
+            doc.removeEventListener('visibilitychange', visibility);
+            if (s.stopStartupWatch === stop) delete s.stopStartupWatch;
+        };
+        const tick = () => {
+            timer = null;
+            if (stopped) return;
+            if (!live()) { stop(); return; }
+            if (doc.visibilityState === 'hidden') return;
+            try {
+                attachChild(s.frame?.contentWindow, s.id);
+                if (live()) revealStartupPopup(s);
+            } catch { /* Native startup may not have exposed its document yet. */ }
+            if (!live()) { stop(); return; }
+            // Events drive readiness; after attachment only check for native
+            // confirmation dialogs and hosts whose startup events were missed.
+            timer = host.setTimeout(tick, s.attached ? 1000 : 250);
+        };
+        const visibility = () => {
+            host.clearTimeout(timer); timer = null;
+            host.clearTimeout(s.timeout);
+            if (stopped || !live()) { stop(); return; }
+            if (doc.visibilityState !== 'hidden') { tick(); armLoadWarning(s); }
+        };
+        s.stopStartupWatch = stop;
+        s.cleanups.push(stop);
+        doc.addEventListener('visibilitychange', visibility);
+        tick();
+    }
+
     function armLoadWarning(s) {
         host.clearTimeout(s.timeout);
+        if (disposed || sessions.get(s.id) !== s || s.ready || s.error || s.needsConfirmation || doc.visibilityState === 'hidden') return;
         s.timeout = host.setTimeout(() => {
-            if (!s.ready && !s.error && !s.needsConfirmation) {
-                s.status = '加载较慢，仍在等待'; queueRender();
+            if (!disposed && sessions.get(s.id) === s && !s.ready && !s.error && !s.needsConfirmation && doc.visibilityState !== 'hidden') {
+                s.startupSlow = true;
+                const status = '加载较慢，可继续等待或关闭窗口后重试';
+                if (s.status !== status) { s.status = status; queueRender(); }
             }
         }, 60000);
     }
@@ -1771,7 +2028,7 @@
 
     function attachChild(w, id) {
         const s = sessions.get(id);
-        if (!s || s.error || s.frame?.contentWindow !== w) return false;
+        if (disposed || !s || s.error || s.abort?.signal.aborted || !w || s.frame?.contentWindow !== w) return false;
         if (s.attached) { s.resumeStartup?.(); return true; }
         if (!w.SillyTavern?.getContext) return false;
         try {
@@ -1781,7 +2038,7 @@
             const startup = w.__PT_BOOT_TRACE__?.startup;
             const requiresExtensions = !!startup;
             const ready = () => {
-                if (s.openStarted || s.ready || s.error || !sessions.has(id) || disposed) return;
+                if (s.openStarted || s.ready || s.error || s.abort?.signal.aborted || sessions.get(id) !== s || disposed) return;
                 s.appReadyReceived ||= startup?.appReady === true;
                 if (!s.extensionsLoaded && startup?.extensionsLoaded === true) {
                     s.extensionsLoaded = true;
@@ -1790,10 +2047,12 @@
                 if (!(requiresExtensions ? startup?.appReady === true : s.appReadyReceived)) return;
                 if (requiresExtensions && startup?.extensionsEnabled !== false && startup?.extensionsLoaded !== true) {
                     if (!s.needsConfirmation) {
-                        s.status = '正在等待扩展加载…';
-                        s.phase = '页面已启动，等待第三方扩展加载完成';
+                        const status = s.startupSlow ? '加载较慢，可继续等待或关闭窗口后重试' : '正在等待扩展加载…';
+                        const phase = '页面已启动，等待第三方扩展加载完成';
+                        if (s.status !== status || s.phase !== phase) {
+                            s.status = status; s.phase = phase; queueRender();
+                        }
                     }
-                    queueRender();
                     return;
                 }
                 // Both events can be replayed or observed more than once.
@@ -1804,7 +2063,7 @@
                 s.phase = '宿主启动完成，正在打开目标角色';
                 // Don't block native event dispatch with character navigation.
                 const openTimer = host.setTimeout(async () => {
-                    if (!sessions.has(id) || disposed || s.ready || s.error) return;
+                    if (sessions.get(id) !== s || disposed || s.ready || s.error || s.abort?.signal.aborted) return;
                     try {
                         const latest = ctx(w);
                         if (typeof latest.selectCharacterById !== 'function') throw new Error('当前版本缺少 selectCharacterById 接口');
@@ -1814,6 +2073,7 @@
                         // field before loading the character's full card.
                         if (s.targetChat) latest.characters[index].chat = s.targetChat;
                         await latest.selectCharacterById(index, s.targetChat ? { chatFile: s.targetChat } : {});
+                        if (sessions.get(id) !== s || disposed || s.error || s.abort?.signal.aborted) return;
                         const loaded = ctx(w);
                         if (loaded.characters[loaded.characterId]?.avatar !== s.targetAvatar) throw new Error('目标角色未成功打开，已保留原会话');
                         if (s.targetChat) {
@@ -1821,6 +2081,7 @@
                             if (current !== s.targetChat) {
                                 if (typeof loaded.openCharacterChat !== 'function') throw new Error('宿主缺少打开指定聊天记录的接口');
                                 await loaded.openCharacterChat(s.targetChat);
+                                if (sessions.get(id) !== s || disposed || s.error || s.abort?.signal.aborted) return;
                             }
                             const verified = ctx(w);
                             if ((verified.chatId || verified.getCurrentChatId?.()) !== s.targetChat) throw new Error('目标聊天记录未成功打开，请重试');
@@ -1839,7 +2100,7 @@
                         w.__PT_DIAGNOSTIC_UNTIL__ = Date.now() + 30000;
                         s.needsConfirmation = false; s.lastStartupPopup = null;
                         s.ready = true; s.phase = '就绪'; s.status = '待命'; s.error = null;
-                        host.clearTimeout(s.timeout); attachSession(s);
+                        host.clearTimeout(s.timeout); s.stopStartupWatch?.(); attachSession(s);
                         await s.profile?.ready;
                         if (!sessions.has(id) || disposed || s.error || !s.frame) return;
                         identity(s); setActive(id);
@@ -1920,7 +2181,7 @@
     }
     function diagnostics() {
         return {
-            script: 'Parallel Tavern', version: VERSION,
+            script: 'Parallel Tavern', version: VERSION, lowGraphicsMode, sharedMode: !!sharedView?.active,
             host: host.__TAURITAVERN__ || host.__TAURI_RUNNING__ ? 'TauriTavern' : 'SillyTavern / browser',
             platformABI: host.__TAURITAVERN__?.abiVersion ?? null,
             hostAppVersion, cleanupErrors, mainErrors: { ...mainErrors },
@@ -1959,6 +2220,8 @@
         render(); await copy();
     }
     function dispose() {
+        if (sharedView?.busy() || (sharedView && sharedView.dispose() === false)) { notify('请先处理共享任务及未保存的回复，再卸载。'); return false; }
+        sharedView = null;
         if ([...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { notify('子会话仍在运行，请先停止或等待完成再卸载。'); return false; }
         disposed = true;
         for (const s of sessions.values()) {
@@ -1989,8 +2252,18 @@
                     if (panel.getBoundingClientRect().height < 20) host.alert(`并行对话 v${VERSION}：脚本已启动，但手机界面被隐藏。请反馈 TT 版本和手机系统。\n${host.navigator.userAgent}`);
                 }
             });
-        }, attachChild, reportChild, diagnostics, dispose,
+        }, attachChild, reportChild, diagnostics, dispose, syncChildAppearance, setLowGraphicsMode,
         setNightMode,
+        setSharedView: view => {
+            if (disposed || (view && (sessions.size !== 1 || [...sessions.values()].some(isBusy)))) return false;
+            sharedView = view;
+            if (view) { enabled = false; pickerOpen = false; }
+            launcherSignature = ''; badgeSignature = ''; render(); return true;
+        },
+        registerSharedManager: manager => { if (!disposed) teardown.push(() => manager.dispose()); },
+        refreshSharedView: queueRender,
+        hideSharedPanel: () => { panelOpen = false; pickerOpen = false; render(); },
+        notifyShared: notify,
         getActiveWindow: () => sessions.get(activeId)?.win || host,
         setLauncherVisible: value => {
             launcherVisible = value !== false;
@@ -1999,17 +2272,18 @@
         },
         requestDispose: () => {
             disposeRequested = true;
-            if (![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) dispose();
+            if (!sharedView?.busy() && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) dispose();
             else { syncRefresh(); notify('脚本已停用，将在现有生成结束后移除并行界面。'); }
         },
     };
+    applyLowGraphics(doc);
     teardown.push(installTauriRuntimeCompatibility(host));
     attachSession(main);
     const events = ctx(host).eventTypes || ctx(host).event_types;
     on(ctx(host).eventSource, events.APP_READY || 'app_ready', () => { appReady = true; queueRender(); }, main);
     let refresh = null;
     const refreshTick = () => {
-        if (disposeRequested && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { dispose(); return; }
+        if (disposeRequested && !sharedView?.busy() && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { dispose(); return; }
         if (doc.visibilityState !== 'hidden') refreshLiveStatus();
     };
     function syncRefresh() {
@@ -2022,7 +2296,7 @@
     syncRefresh();
     teardown.push(() => { host.clearInterval(refresh); refresh = null; });
     const unload = event => {
-        if ([...sessions.values()].some(isBusy)) { event.preventDefault(); event.returnValue = ''; }
+        if (sharedView?.busy() || [...sessions.values()].some(isBusy)) { event.preventDefault(); event.returnValue = ''; }
     };
     host.addEventListener('beforeunload', unload);
     const visibilityChanged = () => {
