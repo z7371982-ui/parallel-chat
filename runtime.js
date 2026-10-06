@@ -1522,7 +1522,10 @@
         const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, cleanups: [], abort: new host.AbortController() };
         // Reserve before awaiting, so fast double clicks cannot create duplicates.
-        sessions.set(id, s); syncIOSCompositing(); panelOpen = true; pickerOpen = false; render();
+        sessions.set(id, s);
+        // Apply iOS compositing optimization BEFORE creating iframe to prevent GPU memory spike
+        syncIOSCompositing();
+        panelOpen = true; pickerOpen = false; render();
         recordPageStage('开始打开副窗口');
         try {
             s.phase = '确认已有聊天记录';
@@ -1570,8 +1573,34 @@
             if (iosBrowser) {
                 const reduced = parsed.createElement('style'); reduced.id = 'pt-ios-compositing';
                 reduced.textContent = iosCompositingCSS;
-                // Present before the first render; no repeated DOM/style polling.
                 parsed.head.append(reduced);
+                // iOS memory optimization: defer non-critical resources
+                const lazyLoader = parsed.createElement('script');
+                lazyLoader.textContent = `(function(){
+                    if(!window.__PT_CHILD_ID__)return;
+                    const deferImages=()=>{
+                        document.querySelectorAll('img[src]').forEach(img=>{
+                            if(!img.dataset.ptOrigSrc){
+                                img.dataset.ptOrigSrc=img.src;
+                                img.removeAttribute('src');
+                            }
+                        });
+                    };
+                    const restoreImages=()=>{
+                        requestIdleCallback(()=>{
+                            document.querySelectorAll('img[data-pt-orig-src]').forEach(img=>{
+                                if(!img.src&&img.dataset.ptOrigSrc){
+                                    img.src=img.dataset.ptOrigSrc;
+                                }
+                            });
+                        },{timeout:3000});
+                    };
+                    if(document.readyState==='loading'){
+                        deferImages();
+                        document.addEventListener('DOMContentLoaded',restoreImages,{once:true});
+                    }
+                })();`;
+                parsed.head.append(lazyLoader);
             }
             const frame = element('iframe', 'pt-frame pt-hidden'); frame.title = `并行角色：${character.name}`;
             frame.name = `pt-${id}`; frame.id = `pt-frame-${id}`;
@@ -1885,7 +1914,28 @@
         if ([...sessions.values()].some(isBusy)) { event.preventDefault(); event.returnValue = ''; }
     };
     host.addEventListener('beforeunload', unload);
-    const visibilityChanged = () => recordPageStage(doc.visibilityState === 'hidden' ? '页面转入后台' : '页面回到前台');
+    const visibilityChanged = () => {
+        recordPageStage(doc.visibilityState === 'hidden' ? '页面转入后台' : '页面回到前台');
+        // iOS memory optimization: pause non-critical tasks when backgrounded
+        if (iosBrowser) {
+            if (doc.visibilityState === 'hidden') {
+                // Pause UI updates and reduce polling frequency
+                host.clearInterval(refresh);
+                host.cancelAnimationFrame(sessionLayoutFrame);
+                sessionLayoutFrame = null;
+            } else {
+                // Resume normal operation when foregrounded
+                if (!disposeRequested) {
+                    const resumeRefresh = host.setInterval(() => {
+                        if (disposeRequested && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { dispose(); return; }
+                        refreshLiveStatus();
+                    }, 1000);
+                    teardown.push(() => host.clearInterval(resumeRefresh));
+                }
+                layoutSessions();
+            }
+        }
+    };
     doc.addEventListener('visibilitychange', visibilityChanged);
     teardown.push(() => doc.removeEventListener('visibilitychange', visibilityChanged));
     const leaving = event => {
