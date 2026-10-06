@@ -7,7 +7,7 @@ const KEY = 'parallel_tavern';
 const CONTROLLER = '__PARALLEL_TAVERN_V2__';
 
 // Child pages show settings too, but only the main page starts the runtime.
-if (window.__PT_CHILD_ID__ || !window.parent.__PT_CHILD_ID__) {
+if ((window.__PT_CHILD_ID__ || !window.parent.__PT_CHILD_ID__) && !(window.frameElement?.dataset.ptSessionId && !window.__PT_CHILD_ID__)) {
     void initialize().catch(error => {
         console.error('[Parallel Tavern extension]', error);
         const status = document.getElementById('pt-extension-status');
@@ -40,7 +40,7 @@ async function initialize() {
     root.innerHTML = `
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>并行对话 · 0.5.10</b>
+                <b>并行对话 · 0.5.13</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">

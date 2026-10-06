@@ -1,11 +1,11 @@
-/* Parallel Tavern 0.5.10 — Tavern Helper global script.
+/* Parallel Tavern 0.5.13 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
 (function parallelTavernBootstrap() {
     'use strict';
     const KEY = '__PARALLEL_TAVERN_V2__';
-    try { if (window.__PT_CHILD_ID__ || window.parent.__PT_CHILD_ID__) return; } catch {}
+    try { if (window.__PT_CHILD_ID__ || window.parent.__PT_CHILD_ID__ || window.frameElement?.dataset.ptSessionId) return; } catch {}
     const startupTiming = { scriptStartedAt: Date.now(), hostPageAgeAtStartMs: null, hostFoundMs: null, launcherReadyMs: null };
     let pendingEntry;
     const owner = `helper-${Date.now()}-${Math.random()}`;
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.5.10 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.5.13 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,7 +110,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.10';
+    const VERSION = '0.5.13';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let hostAppVersion = null;
     let cleanupErrors = 0;
@@ -130,13 +130,40 @@
     let previousPageStage = null;
     let currentPageStage = null;
     const pageStages = [];
-    const mainErrors = { runtime: 0, unhandledRejection: 0 };
+    const mainErrors = { runtime: 0, unhandledRejection: 0, recent: [] };
+    const diagnosticPageId = `page-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const diagnosticStorage = { sessionWrite: 'not-attempted', backupWrite: 'not-attempted', backupRead: 'missing' };
+    const backupKey = 'parallel-tavern.last-parallel-diagnostic';
+    let lastParallelPageStage = null;
+    try {
+        const raw = host.localStorage.getItem(backupKey);
+        if (raw && raw.length <= 32768) {
+            const candidate = JSON.parse(raw);
+            const age = Date.now() - candidate.time;
+            if (candidate.sessions > 1 && Number.isFinite(age) && age >= 0 && age <= 86400000) {
+                lastParallelPageStage = candidate; diagnosticStorage.backupRead = 'ok';
+            } else diagnosticStorage.backupRead = 'expired-or-invalid';
+        } else if (raw) diagnosticStorage.backupRead = 'oversized';
+    } catch { diagnosticStorage.backupRead = 'error'; }
+    function persistStage() {
+        let serialized;
+        try { serialized = JSON.stringify(currentPageStage); } catch { diagnosticStorage.sessionWrite = 'serialization-error'; return; }
+        if (serialized.length > 32768) { diagnosticStorage.sessionWrite = 'oversized'; return; }
+        try { host.sessionStorage.setItem('parallel-tavern.last-stage', serialized); diagnosticStorage.sessionWrite = 'ok'; }
+        catch { diagnosticStorage.sessionWrite = 'error'; }
+        // Keep the last multi-session state when startup creates a new main-only page.
+        // This is an origin-wide backup, NOT proof that the same tab crashed.
+        if (currentPageStage.sessions > 1) {
+            try { host.localStorage.setItem(backupKey, serialized); diagnosticStorage.backupWrite = 'ok'; }
+            catch { diagnosticStorage.backupWrite = 'error'; }
+        }
+    }
     try { previousPageStage = JSON.parse(host.sessionStorage.getItem('parallel-tavern.last-stage') || 'null'); } catch {}
     function recordPageStage(stage) {
         const entry = { stage, time: Date.now(), sessions: sessions.size };
         pageStages.push(entry);
         if (pageStages.length > 16) pageStages.shift();
-        currentPageStage = { ...currentPageStage, version: VERSION, ...entry, visibility: doc.visibilityState, cleanupErrors, mainErrors: { ...mainErrors }, recentStages: [...pageStages] };
+        currentPageStage = { ...currentPageStage, version: VERSION, pageId: diagnosticPageId, ...entry, visibility: doc.visibilityState, cleanupErrors, mainErrors: { ...mainErrors }, recentStages: [...pageStages] };
         if (stage === '副窗口就绪' || stage === '关闭副窗口' || stage.startsWith('副窗口就绪后') || stage === '副窗口扩展加载完成' || stage === '副窗口执行错误' || stage === '主页面执行错误' || stage === '页面转入后台') {
             currentPageStage.resources = [...sessions.values()].map(session => {
                 try {
@@ -152,7 +179,7 @@
                 } catch { return { main: session.id === 'main', accessible: false }; }
             });
         }
-        try { host.sessionStorage.setItem('parallel-tavern.last-stage', JSON.stringify(currentPageStage)); } catch {}
+        persistStage();
     }
     function bootSnapshot(w) {
         const t = w?.__PT_BOOT_TRACE__;
@@ -170,8 +197,24 @@
     recordPageStage('启动扩展');
     const recentChatTimes = new Map();
     const teardown = [];
-    const mainError = e => { if (e.target === host) { mainErrors.runtime++; if (mainErrors.runtime <= 3) recordPageStage('主页面执行错误'); } };
-    const mainRejection = () => { mainErrors.unhandledRejection++; if (mainErrors.unhandledRejection <= 3) recordPageStage('主页面执行错误'); };
+    function mainErrorDetail(error, file, line, column, source) {
+        try {
+            const basename = value => { try { const name = new URL(String(value).slice(0, 2048), host.location.href).pathname.split('/').pop(); return /^[\w.-]{1,100}\.(?:m?js|html)$/.test(name) ? name : '(inline)'; } catch { return '(unknown)'; } };
+            const frames = [...String(error?.stack || '').slice(0, 6000).matchAll(/((?:https?|tauri|asset):\/\/[^\s)]+?):(\d+):(\d+)/g)].slice(0, 3).map(m => ({ file: basename(m[1]), line: Number(m[2]), column: Number(m[3]) }));
+            return { source, name: ['Error','TypeError','ReferenceError','SyntaxError','RangeError','URIError','EvalError','AggregateError'].includes(error?.name) ? error.name : 'Error',
+                file: file ? basename(file) : null, line: Number(line) || null, column: Number(column) || null, frames };
+        } catch { return { source, name: 'Error' }; }
+    }
+    const rememberMainError = detail => { mainErrors.recent = [...mainErrors.recent.slice(-2), detail]; };
+    const mainError = e => {
+        if (e.target !== host) return;
+        mainErrors.runtime++; rememberMainError(mainErrorDetail(e.error, e.filename, e.lineno, e.colno, 'runtime'));
+        if (mainErrors.runtime <= 3) recordPageStage('主页面执行错误');
+    };
+    const mainRejection = e => {
+        mainErrors.unhandledRejection++; rememberMainError(mainErrorDetail(e.reason, null, null, null, 'unhandled-rejection'));
+        if (mainErrors.unhandledRejection <= 3) recordPageStage('主页面执行错误');
+    };
     host.addEventListener('error', mainError, true);
     host.addEventListener('unhandledrejection', mainRejection);
     teardown.push(() => { host.removeEventListener('error', mainError, true); host.removeEventListener('unhandledrejection', mainRejection); });
@@ -183,7 +226,7 @@
     let mainCompositingStyle = null;
     function syncIOSCompositing() {
         if (!iosBrowser) return;
-        if (sessions.size > 1) {
+        if ([...sessions.values()].some(s => s.id !== 'main' && !s.error)) {
             if (!mainCompositingStyle) {
                 mainCompositingStyle = doc.createElement('style');
                 mainCompositingStyle.id = 'pt-ios-compositing';
@@ -467,10 +510,15 @@
     host.addEventListener('resize', layoutSessions);
     host.visualViewport?.addEventListener('resize', layoutSessions);
     host.visualViewport?.addEventListener('scroll', layoutSessions);
-    const sessionSizer = typeof host.ResizeObserver === 'function' ? new host.ResizeObserver(layoutSessions) : null;
+    let sessionLayoutFrame = null;
+    const scheduleSessionLayout = () => {
+        if (disposed || sessionLayoutFrame !== null) return;
+        sessionLayoutFrame = host.requestAnimationFrame(() => { sessionLayoutFrame = null; if (!disposed) layoutSessions(); });
+    };
+    const sessionSizer = typeof host.ResizeObserver === 'function' ? new host.ResizeObserver(scheduleSessionLayout) : null;
     sessionSizer?.observe(shell);
     teardown.push(() => {
-        sessionSizer?.disconnect(); host.removeEventListener('resize', layoutSessions);
+        sessionSizer?.disconnect(); host.cancelAnimationFrame(sessionLayoutFrame); host.removeEventListener('resize', layoutSessions);
         host.visualViewport?.removeEventListener('resize', layoutSessions);
         host.visualViewport?.removeEventListener('scroll', layoutSessions);
     });
@@ -565,12 +613,17 @@
         }
         positionCompletionBadge();
     }
-    const floatObserver = typeof host.ResizeObserver === 'function' ? new host.ResizeObserver(keepFloatingVisible) : null;
+    let floatingLayoutFrame = null;
+    const scheduleFloatingLayout = () => {
+        if (disposed || floatingLayoutFrame !== null) return;
+        floatingLayoutFrame = host.requestAnimationFrame(() => { floatingLayoutFrame = null; if (!disposed) keepFloatingVisible(); });
+    };
+    const floatObserver = typeof host.ResizeObserver === 'function' ? new host.ResizeObserver(scheduleFloatingLayout) : null;
     floatObserver?.observe(panel); floatObserver?.observe(launcher); floatObserver?.observe(toast);
     host.addEventListener('resize', keepFloatingVisible);
     host.visualViewport?.addEventListener('resize', keepFloatingVisible);
     host.visualViewport?.addEventListener('scroll', keepFloatingVisible);
-    teardown.push(() => { floatObserver?.disconnect(); host.removeEventListener('resize', keepFloatingVisible);
+    teardown.push(() => { floatObserver?.disconnect(); host.cancelAnimationFrame(floatingLayoutFrame); host.removeEventListener('resize', keepFloatingVisible);
         host.visualViewport?.removeEventListener('resize', keepFloatingVisible); host.visualViewport?.removeEventListener('scroll', keepFloatingVisible); });
     const notify = message => {
         toast.textContent = message; toast.hidden = false; setFloating(toast, true);
@@ -973,6 +1026,23 @@
         try { await ctx(session.win).stopGeneration(); session.status = '正在停止'; queueRender(); }
         catch (error) { notify(`停止失败：${shortError(error)}`); }
     }
+    function releaseChild(session) {
+        session.abort?.abort();
+        host.clearTimeout(session.timeout);
+        runCleanups(session.cleanups);
+        if (session.frame) sessionSizer?.unobserve(session.frame);
+        session.frame?.remove();
+        session.frame = null; session.win = null; session.profile = null;
+    }
+    function failChildSession(session, error, phase = '副窗口加载失败') {
+        if (disposed || sessions.get(session.id) !== session || session.error) return;
+        session.error = shortError(error); session.status = '已停止'; session.phase = phase;
+        session.ready = false; session.busy = false; session.needsConfirmation = false;
+        releaseChild(session);
+        syncIOSCompositing();
+        if (activeId === session.id) setActive('main');
+        recordPageStage(phase); queueRender(); notify(session.error);
+    }
     function closeSession(session) {
         if (session.id === 'main') return;
         if (isBusy(session)) return notify('请先停止或等待这个角色生成、保存结束。');
@@ -981,12 +1051,9 @@
             const input = session.win.document.querySelector('#send_textarea');
             if (input?.value && !host.confirm('这个会话还有未发送的草稿。仍然关闭？')) return;
         }
-        host.clearTimeout(session.timeout);
-        runCleanups(session.cleanups);
-        session.frame?.remove(); sessions.delete(session.id);
+        releaseChild(session); sessions.delete(session.id);
         syncIOSCompositing();
         recordPageStage('关闭副窗口');
-        if (session.frame) sessionSizer?.unobserve(session.frame);
         if (activeId === session.id) setActive('main');
         render();
     }
@@ -1086,7 +1153,14 @@
         }
         report('子页面引导脚本已执行');
         window.addEventListener('error', e => {
-            if (e.target?.tagName === 'SCRIPT') report('脚本资源加载失败', { ...errorDetails(null, e.target.src), kind: 'SCRIPT_LOAD_FAILED' });
+            if (e.target?.tagName === 'SCRIPT') {
+                let requiredEntry = false;
+                try {
+                    const source = new URL(e.target.src, baseURL), entry = new URL('script.js', baseURL);
+                    requiredEntry = source.origin === entry.origin && source.pathname === entry.pathname;
+                } catch {}
+                report('脚本资源加载失败', { ...errorDetails(null, e.target.src), kind: requiredEntry ? 'CORE_SCRIPT_LOAD_FAILED' : 'SCRIPT_LOAD_FAILED' });
+            }
             else if (e.target !== window) {
                 const tag = e.target?.tagName || 'OTHER';
                 trace.resourceErrors[tag] = (trace.resourceErrors[tag] || 0) + 1;
@@ -1201,6 +1275,36 @@
         const originalFetch = window.fetch.bind(window);
         const isTT = !!parentHost.__TAURITAVERN__ || !!parentHost.__TAURI_RUNNING__;
         let localRevision = null;
+        const bootDataError = message => {
+            // The host may catch a failed startup fetch without APP_READY or
+            // unhandledrejection. Report our own fatal validation explicitly.
+            report('副窗口启动数据无效', { kind: 'BOOT_DATA_INVALID' });
+            return new Error(message);
+        };
+        const readStartupJSON = async response => {
+            try { return await response.json(); }
+            catch { throw bootDataError('副窗口启动数据无法解析，已停止并释放窗口。'); }
+        };
+        // TT 2.x supplies this settings envelope inside /api/bootstrap instead
+        // of /api/settings/get. Both startup paths must receive the same local
+        // settings, before their native autoloadLastChat can run.
+        const isolateSettingsPayload = payload => {
+            if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw bootDataError('启动设置返回异常，已停止副窗口。');
+            payload.enable_extensions_auto_update = false;
+            if (payload.hash_algorithm && payload.settings_hash) localRevision = { hash_algorithm: payload.hash_algorithm, settings_hash: payload.settings_hash };
+            else if (payload.tauritavern_settings_revision) localRevision = payload.tauritavern_settings_revision;
+            const serialized = typeof payload.settings === 'string';
+            let settings;
+            try { settings = serialized ? JSON.parse(payload.settings) : payload.settings; }
+            catch { throw bootDataError('启动设置无法解析，已停止副窗口。'); }
+            if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
+                // Open the verified target explicitly after APP_READY, rather
+                // than loading the parent's last chat during child startup.
+                settings.active_character = null; settings.active_group = null;
+                payload.settings = serialized ? JSON.stringify(settings) : settings;
+            }
+            return payload;
+        };
         // A host extension may wrap our fetch then assign it back. Mark the
         // options (not HTTP headers) so nested wrappers parse settings only once.
         const fetchPass = Symbol('parallel-tavern-fetch-pass');
@@ -1209,6 +1313,7 @@
             init = { ...init, [fetchPass]: true };
             const url = new URL(typeof input === 'string' || input instanceof URL ? String(input) : input.url, baseURL);
             const method = String(init.method || input?.method || 'GET').toUpperCase();
+            const local = url.origin === new URL(baseURL).origin;
             if (url.origin === new URL(baseURL).origin && method !== 'GET' && /\/api\/chats\/(save|save-metadata|rename|delete)$/.test(url.pathname)) guardChatWrite();
             if (url.origin === new URL(baseURL).origin && url.pathname.endsWith('/csrf-token')) {
                 const headers = parentHost.SillyTavern?.getContext()?.getRequestHeaders?.();
@@ -1223,25 +1328,26 @@
             let request = null;
             if ((!window.__PT_BOOT_DONE__ || Date.now() < (window.__PT_DIAGNOSTIC_UNTIL__ || 0)) && url.origin === new URL(baseURL).origin) {
                 const match = url.pathname.match(/^\/api\/(settings|secrets|extensions|presets|characters|backgrounds|avatars|tokenizers|worldinfo|chats|users)\/([a-z-]+)$/);
-                const route = match ? `/api/${match[1]}/${match[2]}` : ['/version','/csrf-token'].includes(url.pathname) ? url.pathname : '(other local resource)';
+                const route = match ? `/api/${match[1]}/${match[2]}` : ['/version','/csrf-token','/api/bootstrap'].includes(url.pathname) ? url.pathname : '(other local resource)';
                 if (route !== '(other local resource)' && trace.requests.length >= 80) { const i = trace.requests.findIndex(r => r.state !== 'pending'); if (i >= 0) trace.requests.splice(i, 1); }
                 if (route !== '(other local resource)' && trace.requests.length < 80) { request = { route, state: 'pending', started: Date.now() }; trace.requests.push(request); }
             }
             let response;
             try { response = await next(input, init); if (request) { request.state = 'responded'; request.status = response.status; request.elapsedMs = Date.now() - request.started; } }
             catch (error) { if (request) { request.state = 'rejected'; request.elapsedMs = Date.now() - request.started; } throw error; }
-            if (url.origin === new URL(baseURL).origin && url.pathname.endsWith('/api/settings/get') && response.ok) {
-                const payload = await response.clone().json();
-                if (payload.hash_algorithm && payload.settings_hash) localRevision = { hash_algorithm: payload.hash_algorithm, settings_hash: payload.settings_hash };
-                else if (payload.tauritavern_settings_revision) localRevision = payload.tauritavern_settings_revision;
-                if (typeof payload.settings === 'string') {
-                    const settings = JSON.parse(payload.settings);
-                    // Open the verified target explicitly after APP_READY, rather
-                    // than letting startup silently load/create a stale chat.
-                    settings.active_character = null; settings.active_group = null;
-                    payload.settings = JSON.stringify(settings);
-                    return new Response(JSON.stringify(payload), { status: response.status, headers: { 'Content-Type': 'application/json' } });
-                }
+            if (local && url.pathname.endsWith('/api/bootstrap') && response.ok) {
+                // Isolate startup settings while preserving the host's character
+                // library and other data used by third-party extensions.
+                const payload = await readStartupJSON(response);
+                if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw bootDataError('启动数据返回异常，已停止副窗口。');
+                payload.settings = isolateSettingsPayload(payload.settings);
+                return new Response(JSON.stringify(payload), { status: response.status, headers: { 'Content-Type': 'application/json' } });
+            }
+            if (local && url.pathname.endsWith('/api/settings/get') && response.ok) {
+                // This response is replaced, so consume it once. clone() tees
+                // the body and leaves a second large settings buffer unread.
+                const payload = isolateSettingsPayload(await readStartupJSON(response));
+                return new Response(JSON.stringify(payload), { status: response.status, headers: { 'Content-Type': 'application/json' } });
             }
             return response;
         };
@@ -1270,7 +1376,7 @@
         }
         if ([...sessions.values()].some(s => s.id !== 'main' && !s.ready && !s.error)) return notify('有一个副窗口正在加载，请等它就绪后再添加。');
         const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-        const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, cleanups: [] };
+        const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, cleanups: [], abort: new host.AbortController() };
         // Reserve before awaiting, so fast double clicks cannot create duplicates.
         sessions.set(id, s); syncIOSCompositing(); panelOpen = true; pickerOpen = false; render();
         recordPageStage('开始打开副窗口');
@@ -1278,9 +1384,11 @@
             s.phase = '确认已有聊天记录';
             const historyResponse = await host.fetch(new URL('api/characters/chats', host.location.href).href, {
                 method: 'POST', headers: ctx(host).getRequestHeaders(), body: JSON.stringify({ avatar_url: avatar, ch_name: character.name }),
+                signal: s.abort.signal,
             });
             if (!historyResponse.ok) throw new Error('无法确认历史聊天，已停止打开副窗口，以免误建新档。');
             const history = await historyResponse.json();
+            if (!sessions.has(id) || disposed) return;
             if (!history || typeof history !== 'object' || history.error) throw new Error('聊天列表返回异常，已停止打开副窗口。');
             const chats = Object.values(history).filter(c => c && typeof c.file_name === 'string');
             if (Object.values(history).length !== chats.length) throw new Error('无法识别聊天列表，已停止打开，未创建新档。');
@@ -1323,11 +1431,29 @@
             }
             const frame = element('iframe', 'pt-frame pt-hidden'); frame.title = `并行角色：${character.name}`;
             frame.name = `pt-${id}`; frame.id = `pt-frame-${id}`;
+            frame.dataset.ptSessionId = id;
             frame.dataset.ttMobileSurface = 'viewport-host'; frame.setAttribute('aria-hidden', 'true');
             s.frame = frame;
             s.cleanups.push(() => frame.contentWindow?.__PT_SETTINGS_DISPOSE__?.());
-            s.cleanups.push(() => frame.contentWindow?.__PT_BRIDGE_DISPOSE__?.());
-            s.cleanups.push(() => frame.contentWindow?.__PT_DIAGNOSTICS_STOP__?.());
+            // A reload would fetch the original host HTML without our prelude.
+            // Stop that session instead of letting an unisolated second app run.
+            let guardedDocument = null;
+            const navigationError = () => failChildSession(s, '副窗口发生了刷新或导航，已释放该窗口以防重复启动。请关闭此会话卡片后重新打开。', '副窗口导航已拦截');
+            const checkDocument = () => {
+                if (disposed || !sessions.has(id) || s.error || frame.dataset.ptBootWritten !== 'yes') return;
+                try {
+                    const w = frame.contentWindow;
+                    if (w.__PT_CHILD_ID__ !== id || (guardedDocument && guardedDocument !== w.document)) return navigationError();
+                    if (!guardedDocument) {
+                        guardedDocument = w.document;
+                        for (const clean of [w.__PT_BRIDGE_DISPOSE__, w.__PT_DIAGNOSTICS_STOP__]) if (typeof clean === 'function') s.cleanups.push(clean);
+                        w.addEventListener('pagehide', navigationError, { once: true });
+                        s.cleanups.push(() => w.removeEventListener('pagehide', navigationError));
+                    }
+                } catch { navigationError(); }
+            };
+            frame.addEventListener('load', checkDocument);
+            s.cleanups.push(() => frame.removeEventListener('load', checkDocument));
             shell.append(frame);
             recordPageStage('初始化副窗口');
             layoutSessions(); sessionSizer?.observe(frame);
@@ -1348,6 +1474,8 @@
             doc.head.append(writer); writer.remove();
             recordPageStage('副窗口页面已写入');
             if (frame.dataset.ptBootWritten !== 'yes') throw new Error('宿主阻止了子会话启动脚本。并行面板可用，但此环境暂不能打开并行会话。');
+            checkDocument();
+            if (s.error || !sessions.has(id) || disposed) return;
             const watch = host.setInterval(() => {
                 if (s.ready || s.error || !sessions.has(id) || disposed) { host.clearInterval(watch); return; }
                 try { attachChild(frame.contentWindow, id); revealStartupPopup(s); } catch {}
@@ -1355,8 +1483,7 @@
             s.cleanups.push(() => host.clearInterval(watch));
             armLoadWarning(s);
         } catch (error) {
-            recordPageStage('副窗口加载失败');
-            s.status = '加载失败'; s.error = shortError(error); queueRender(); notify(s.error);
+            failChildSession(s, error);
         }
     }
 
@@ -1392,7 +1519,7 @@
 
     function attachChild(w, id) {
         const s = sessions.get(id);
-        if (!s || s.frame?.contentWindow !== w) return false;
+        if (!s || s.error || s.frame?.contentWindow !== w) return false;
         if (s.attached) return true;
         if (!w.SillyTavern?.getContext) return false;
         try {
@@ -1410,7 +1537,7 @@
                 s.phase = 'APP_READY 已触发，正在打开目标角色';
                 // Don't block native APP_READY dispatch with character navigation.
                 host.setTimeout(async () => {
-                    if (!sessions.has(id) || disposed || s.ready) return;
+                    if (!sessions.has(id) || disposed || s.ready || s.error) return;
                     try {
                         const latest = ctx(w);
                         if (typeof latest.selectCharacterById !== 'function') throw new Error('当前版本缺少 selectCharacterById 接口');
@@ -1431,7 +1558,7 @@
                             const verified = ctx(w);
                             if ((verified.chatId || verified.getCurrentChatId?.()) !== s.targetChat) throw new Error('目标聊天记录未成功打开，请重试');
                         }
-                        if (!sessions.has(id) || disposed) return;
+                        if (!sessions.has(id) || disposed || s.error) return;
                         if (s.existingHistory) {
                             const verified = ctx(w);
                             if (w.__PT_BOOT_TRACE__?.chatProtection?.blockedWrites) throw new Error('加载期间出现了写入历史记录的尝试，已拦截并停止副窗口。请复制诊断。');
@@ -1447,7 +1574,7 @@
                         s.ready = true; s.phase = '就绪'; s.status = '待命'; s.error = null;
                         host.clearTimeout(s.timeout); attachSession(s);
                         await s.profile?.ready;
-                        if (!sessions.has(id) || disposed) return;
+                        if (!sessions.has(id) || disposed || s.error || !s.frame) return;
                         identity(s); setActive(id);
                         recordPageStage('副窗口就绪');
                         for (const seconds of [1, 3, 8, 15, 30]) {
@@ -1459,7 +1586,7 @@
                             }, seconds * 1000);
                             s.cleanups.push(() => host.clearTimeout(checkpoint));
                         }
-                    } catch (error) { host.clearTimeout(s.timeout); s.status = '加载失败'; s.error = shortError(error); s.phase = '目标聊天读取失败'; recordPageStage('目标聊天读取失败'); queueRender(); notify(s.error); }
+                    } catch (error) { failChildSession(s, error, '目标聊天读取失败'); }
                 }, 0);
             };
             on(c.eventSource, events.EXTENSION_SETTINGS_LOADED || 'extension_settings_loaded', () => {
@@ -1482,10 +1609,12 @@
             if (s.issues.length < 15) s.issues.push(typeof issue === 'object' ? JSON.parse(JSON.stringify(issue)) : String(issue).slice(0, 100));
             if (iosBrowser && s.issues.length <= 3) recordPageStage('副窗口执行错误');
             if (!s.ready && issue?.kind === 'CHAT_INPUT_MISSING') {
-                host.clearTimeout(s.timeout);
-                s.phase = '输入框初始化失败'; s.status = '加载失败';
-                s.error = 'TT 初始化时未找到有效聊天输入框。请复制诊断，无需再等 60 秒。';
-                queueRender();
+                // Let the reporting script finish before disposing its document.
+                host.setTimeout(() => failChildSession(s, 'TT 初始化时未找到有效聊天输入框，已释放副窗口。', '输入框初始化失败'), 0);
+            } else if (!s.ready && issue?.kind === 'BOOT_DATA_INVALID') {
+                host.setTimeout(() => failChildSession(s, '副窗口的启动设置或角色数据无效，已释放窗口。请刷新主页面角色列表后重试。', '副窗口启动数据无效'), 0);
+            } else if (!s.ready && issue?.kind === 'CORE_SCRIPT_LOAD_FAILED') {
+                host.setTimeout(() => failChildSession(s, '宿主聊天入口脚本加载失败，已释放副窗口。请关闭此会话卡片后重新打开。', '宿主入口加载失败'), 0);
             }
         }
     }
@@ -1521,6 +1650,8 @@
             platformABI: host.__TAURITAVERN__?.abiVersion ?? null,
             hostAppVersion, cleanupErrors, mainErrors: { ...mainErrors },
             startupTiming: { ...startupTiming },
+            diagnosticStorage: { ...diagnosticStorage }, lastParallelPageStage,
+            lastParallelPageStageScope: 'same-origin; may belong to another tab; not proof of a crash',
             iosFixedLayer: iosBrowser, iosReducedCompositing: !!mainCompositingStyle, previousPageStage, currentPageStage,
             navigationType: host.performance?.getEntriesByType?.('navigation')?.[0]?.type || null,
             launcherVisible, enabled, appReady, activeSession: activeId, lastAction,
@@ -1555,7 +1686,11 @@
     function dispose() {
         if ([...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { notify('子会话仍在运行，请先停止或等待完成再卸载。'); return false; }
         disposed = true;
-        for (const s of sessions.values()) { host.clearTimeout(s.timeout); runCleanups(s.cleanups); s.frame?.remove(); }
+        for (const s of sessions.values()) {
+            if (s.id === 'main') { host.clearTimeout(s.timeout); runCleanups(s.cleanups); }
+            else releaseChild(s);
+        }
+        sessions.clear();
         runCleanups(teardown);
         host.clearTimeout(toastTimer);
         for (const e of [style, shell, launcher, panel, picker, toast, completionBadge]) e.remove();
@@ -1610,7 +1745,7 @@
     teardown.push(() => doc.removeEventListener('visibilitychange', visibilityChanged));
     const leaving = event => {
         currentPageStage = { ...currentPageStage, pageExitObserved: true, pageExitTime: Date.now(), persisted: !!event.persisted };
-        try { host.sessionStorage.setItem('parallel-tavern.last-stage', JSON.stringify(currentPageStage)); } catch {}
+        persistStage();
     };
     const resumed = event => {
         if (!event.persisted) return;
