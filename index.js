@@ -2,9 +2,35 @@ import { extension_settings } from '../../../extensions.js';
 import { saveSettingsDebounced } from '../../../../script.js';
 import { installScrollQrCompatibility } from './qr-compat.js';
 import { installCharacterProfiles } from './character-profiles.js';
+import * as nativeOpenAI from '../../../openai.js';
 
 const KEY = 'parallel_tavern';
 const CONTROLLER = '__PARALLEL_TAVERN_V2__';
+const nativeProxyModules = new WeakMap();
+
+function getNativeProxySettings(win) {
+    if (win === window) return Promise.resolve(nativeOpenAI);
+    if (!nativeProxyModules.has(win)) {
+        nativeProxyModules.set(win, new Promise((resolve, reject) => {
+            // Import in the child document: every conversation owns its native
+            // settings and proxy list. A parent import would mix credentials.
+            const script = win.document.createElement('script');
+            script.type = 'module';
+            const cleanup = () => {
+                win.clearTimeout(timeout);
+                win.removeEventListener('pt-native-proxy-ready', ready);
+                script.remove();
+            };
+            const ready = () => { cleanup(); resolve(win.__PT_NATIVE_PROXY__); };
+            const timeout = win.setTimeout(() => { cleanup(); reject(new Error('读取原生代理预设超时')); }, 10000);
+            win.addEventListener('pt-native-proxy-ready', ready, { once: true });
+            script.onerror = () => { cleanup(); reject(new Error('无法读取原生代理预设')); };
+            script.textContent = `import * as proxy from ${JSON.stringify(new URL('scripts/openai.js', window.location.href).href)}; window.__PT_NATIVE_PROXY__ = proxy; window.dispatchEvent(new window.Event('pt-native-proxy-ready'));`;
+            win.document.head.append(script);
+        }));
+    }
+    return nativeProxyModules.get(win);
+}
 
 // Child pages show settings too, but only the main page starts the runtime.
 if (window.__PT_CHILD_ID__ || !window.parent.__PT_CHILD_ID__) {
@@ -31,7 +57,7 @@ async function initialize() {
     window.__PT_SETTINGS_BRIDGE__ = { settings, persist };
     window.__PT_EXTENSION_CONFIG__ = settings;
     window.__PT_INSTALL_SCROLL_QR_COMPAT__ = installScrollQrCompatibility;
-    window.__PT_INSTALL_CHARACTER_PROFILES__ = (win, options) => installCharacterProfiles(win, { ...options, settings, save: saveSettingsDebounced });
+    window.__PT_INSTALL_CHARACTER_PROFILES__ = (win, options) => installCharacterProfiles(win, { ...options, settings, save: saveSettingsDebounced, nativeProxy: () => getNativeProxySettings(win) });
     }
 
     const root = document.createElement('div');
@@ -40,7 +66,7 @@ async function initialize() {
     root.innerHTML = `
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>并行对话 · 0.5.6-r1</b>
+                <b>并行对话 · 0.5.6-r1-proxyfix2</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">

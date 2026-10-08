@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.5.6-r1 — Tavern Helper global script.
+/* Parallel Tavern 0.5.6-r1-proxyfix2 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.5.6-r1 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.5.6-r1-proxyfix2 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,7 +110,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.6-r1';
+    const VERSION = '0.5.6-r1-proxyfix2';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let previousPageStage = null;
     let currentPageStage = null;
@@ -922,7 +922,8 @@
     }
     function attachSession(session) {
         if (host.__PT_INSTALL_CHARACTER_PROFILES__ && !session.profile) {
-            session.profile = host.__PT_INSTALL_CHARACTER_PROFILES__(session.win, { busy: () => isBusy(session), notify });
+            session.profile = host.__PT_INSTALL_CHARACTER_PROFILES__(session.win, { busy: () => isBusy(session), notify, initialSelection: session.initialSelection });
+            session.initialSelection = null;
             session.cleanups.push(() => session.profile.dispose());
         }
         if (host.__PT_INSTALL_SCROLL_QR_COMPAT__) session.cleanups.push(host.__PT_INSTALL_SCROLL_QR_COMPAT__(session.win, () => sessions.get(activeId)?.win || host));
@@ -1200,8 +1201,13 @@
             return notify('最多保留 3 个会话。请先关闭一个已结束的子会话，再打开其他角色。');
         }
         if ([...sessions.values()].some(s => s.id !== 'main' && !s.ready && !s.error)) return notify('有一个副窗口正在加载，请等它就绪后再添加。');
+        let initialSelection = null;
+        if (host.__PT_EXTENSION_CONFIG__?.rememberCharacterSettings !== false && !Object.hasOwn(host.__PT_EXTENSION_CONFIG__?.characterProfiles || {}, avatar)) {
+            try { initialSelection = sessions.get(activeId)?.profile?.capture() || null; }
+            catch (error) { return notify(shortError(error)); }
+        }
         const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-        const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, cleanups: [] };
+        const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, initialSelection, cleanups: [] };
         // Reserve before awaiting, so fast double clicks cannot create duplicates.
         sessions.set(id, s); panelOpen = true; pickerOpen = false; render();
         recordPageStage('开始打开副窗口');
