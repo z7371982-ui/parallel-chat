@@ -1,11 +1,11 @@
-/* Parallel Tavern 0.5.17 — Tavern Helper global script.
+/* Parallel Tavern 0.5.6-r1 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
 (function parallelTavernBootstrap() {
     'use strict';
     const KEY = '__PARALLEL_TAVERN_V2__';
-    try { if (window.__PT_CHILD_ID__ || window.parent.__PT_CHILD_ID__ || window.frameElement?.dataset.ptSessionId) return; } catch {}
+    try { if (window.__PT_CHILD_ID__ || window.parent.__PT_CHILD_ID__) return; } catch {}
     const startupTiming = { scriptStartedAt: Date.now(), hostPageAgeAtStartMs: null, hostFoundMs: null, launcherReadyMs: null };
     let pendingEntry;
     const owner = `helper-${Date.now()}-${Math.random()}`;
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.5.17 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.5.6-r1 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -102,157 +102,28 @@
             }
         }, 500);
     }
-    const releaseOwner = event => {
-        // Cached documents resume without evaluating the extension again.
-        if (event.persisted) return;
-        window.removeEventListener('pagehide', releaseOwner);
+    window.addEventListener('pagehide', () => {
         stopped = true; window.clearInterval(retry); pendingEntry?.remove();
         if (host?.[KEY]?.owner === owner) host[KEY].requestDispose();
-    };
-    window.addEventListener('pagehide', releaseOwner);
+    }, { once: true });
 
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.17';
+    const VERSION = '0.5.6-r1';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
-    let hostAppVersion = null;
-    let cleanupErrors = 0;
-    function runCleanups(callbacks) {
-        for (const clean of callbacks.splice(0)) {
-            try {
-                const result = clean();
-                if (result && typeof result.then === 'function') Promise.resolve(result).catch(() => { cleanupErrors++; });
-            } catch { cleanupErrors++; }
-        }
-    }
-    if (typeof host.__TAURI__?.app?.getVersion === 'function') {
-        Promise.resolve().then(() => host.__TAURI__.app.getVersion()).then(value => {
-            if (typeof value === 'string' && /^[\w.+-]{1,64}$/.test(value)) hostAppVersion = value;
-        }).catch(() => {});
-    }
     let previousPageStage = null;
     let currentPageStage = null;
-    const pageStages = [];
-    const mainErrors = { runtime: 0, unhandledRejection: 0, recent: [] };
-    const diagnosticPageId = `page-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    const diagnosticStorage = { sessionWrite: 'not-attempted', backupWrite: 'not-attempted', backupRead: 'missing' };
-    const backupKey = 'parallel-tavern.last-parallel-diagnostic';
-    let lastParallelPageStage = null;
-    try {
-        const raw = host.localStorage.getItem(backupKey);
-        if (raw && raw.length <= 32768) {
-            const candidate = JSON.parse(raw);
-            const age = Date.now() - candidate.time;
-            if (candidate.sessions > 1 && Number.isFinite(age) && age >= 0 && age <= 86400000) {
-                lastParallelPageStage = candidate; diagnosticStorage.backupRead = 'ok';
-            } else diagnosticStorage.backupRead = 'expired-or-invalid';
-        } else if (raw) diagnosticStorage.backupRead = 'oversized';
-    } catch { diagnosticStorage.backupRead = 'error'; }
-    function persistStage() {
-        let serialized;
-        try { serialized = JSON.stringify(currentPageStage); } catch { diagnosticStorage.sessionWrite = 'serialization-error'; return; }
-        if (serialized.length > 32768) { diagnosticStorage.sessionWrite = 'oversized'; return; }
-        try { host.sessionStorage.setItem('parallel-tavern.last-stage', serialized); diagnosticStorage.sessionWrite = 'ok'; }
-        catch { diagnosticStorage.sessionWrite = 'error'; }
-        // Keep the last multi-session state when startup creates a new main-only page.
-        // This is an origin-wide backup, NOT proof that the same tab crashed.
-        if (currentPageStage.sessions > 1) {
-            try { host.localStorage.setItem(backupKey, serialized); diagnosticStorage.backupWrite = 'ok'; }
-            catch { diagnosticStorage.backupWrite = 'error'; }
-        }
-    }
     try { previousPageStage = JSON.parse(host.sessionStorage.getItem('parallel-tavern.last-stage') || 'null'); } catch {}
     function recordPageStage(stage) {
-        const entry = { stage, time: Date.now(), sessions: sessions.size };
-        pageStages.push(entry);
-        if (pageStages.length > 16) pageStages.shift();
-        currentPageStage = { ...currentPageStage, version: VERSION, pageId: diagnosticPageId, ...entry, visibility: doc.visibilityState, cleanupErrors, mainErrors: { ...mainErrors }, recentStages: [...pageStages] };
-        if (stage === '切换到副窗口' || stage === '副窗口就绪' || stage === '关闭副窗口' || stage.startsWith('副窗口就绪后') || stage === '副窗口扩展加载完成' || stage === '副窗口执行错误' || stage === '主页面执行错误' || stage === '页面转入后台') {
-            currentPageStage.resources = [...sessions.values()].map(session => {
-                try {
-                    const w = session.win, d = w?.document;
-                    return { main: session.id === 'main', ready: !!session.ready,
-                        iframes: d?.getElementsByTagName('iframe').length ?? null,
-                        images: d?.images.length ?? null, scripts: d?.scripts.length ?? null,
-                        nativeListeners: w?.__PT_BOOT_TRACE__?.bridgeEvents?.active ?? null,
-                        extensionsLoaded: !!session.extensionsLoaded, errors: session.issues?.length || 0,
-                        loading: bootSnapshot(w),
-                        recentIssues: (session.issues || []).slice(-3),
-                        reducedCompositing: !!d?.getElementById('pt-ios-compositing') };
-                } catch { return { main: session.id === 'main', accessible: false }; }
-            });
-        }
-        persistStage();
-    }
-    function bootSnapshot(w) {
-        const t = w?.__PT_BOOT_TRACE__;
-        if (!t) return null;
-        return { sampledAt: Date.now(), nativeCalls: t.nativeCalls ? JSON.parse(JSON.stringify(t.nativeCalls)) : null,
-            bridgeBytes: t.bridgeBytes ? { ...t.bridgeBytes } : null,
-            resourceErrors: { ...t.resourceErrors },
-            startup: t.startup ? { ...t.startup } : null,
-            trackedPendingRequests: t.requests.filter(r => r.state === 'pending').length,
-            recentRequests: t.requests.slice(-12).map(r => ({ route: r.route, state: r.state, status: r.status ?? null,
-                elapsedMs: r.elapsedMs ?? Date.now() - r.started })),
-            mainThread: t.mainThread ? { ...t.mainThread } : null };
+        currentPageStage = { version: VERSION, stage, time: Date.now(), sessions: sessions.size };
+        try { host.sessionStorage.setItem('parallel-tavern.last-stage', JSON.stringify(currentPageStage)); } catch {}
     }
     const MAX_SESSIONS = 3;
     const sessions = new Map();
     recordPageStage('启动扩展');
     const recentChatTimes = new Map();
     const teardown = [];
-    function mainErrorDetail(error, file, line, column, source) {
-        try {
-            const basename = value => { try { const name = new URL(String(value).slice(0, 2048), host.location.href).pathname.split('/').pop(); return /^[\w.-]{1,100}\.(?:m?js|html)$/.test(name) ? name : '(inline)'; } catch { return '(unknown)'; } };
-            const frames = [...String(error?.stack || '').slice(0, 6000).matchAll(/((?:https?|tauri|asset):\/\/[^\s)]+?):(\d+):(\d+)/g)].slice(0, 3).map(m => ({ file: basename(m[1]), line: Number(m[2]), column: Number(m[3]) }));
-            return { source, name: ['Error','TypeError','ReferenceError','SyntaxError','RangeError','URIError','EvalError','AggregateError'].includes(error?.name) ? error.name : 'Error',
-                file: file ? basename(file) : null, line: Number(line) || null, column: Number(column) || null, frames };
-        } catch { return { source, name: 'Error' }; }
-    }
-    const rememberMainError = detail => { mainErrors.recent = [...mainErrors.recent.slice(-2), detail]; };
-    const mainError = e => {
-        if (e.target !== host) return;
-        mainErrors.runtime++; rememberMainError(mainErrorDetail(e.error, e.filename, e.lineno, e.colno, 'runtime'));
-        if (mainErrors.runtime <= 3) recordPageStage('主页面执行错误');
-    };
-    const mainRejection = e => {
-        mainErrors.unhandledRejection++; rememberMainError(mainErrorDetail(e.reason, null, null, null, 'unhandled-rejection'));
-        if (mainErrors.unhandledRejection <= 3) recordPageStage('主页面执行错误');
-    };
-    host.addEventListener('error', mainError, true);
-    host.addEventListener('unhandledrejection', mainRejection);
-    teardown.push(() => { host.removeEventListener('error', mainError, true); host.removeEventListener('unhandledrejection', mainRejection); });
-    // Restrict this reversible workaround to iOS documents owned by this controller.
-    // Keep native chat DOM and script execution alive while background streams run.
-    const iosCompositingCSS = `html:root, html:root *, html:root *::before, html:root *::after, html:root ::backdrop {
-        -webkit-backdrop-filter: none !important; backdrop-filter: none !important;
-    }`;
-    let mainCompositingStyle = null;
-    function syncIOSCompositing() {
-        if (!iosBrowser) return;
-        if ([...sessions.values()].some(s => s.id !== 'main' && !s.error)) {
-            if (!mainCompositingStyle) {
-                mainCompositingStyle = doc.createElement('style');
-                mainCompositingStyle.id = 'pt-ios-compositing';
-                mainCompositingStyle.textContent = iosCompositingCSS;
-                doc.head.append(mainCompositingStyle);
-            }
-        } else {
-            mainCompositingStyle?.remove(); mainCompositingStyle = null;
-        }
-    }
-    teardown.push(() => { mainCompositingStyle?.remove(); mainCompositingStyle = null; });
-    // The main chat used to keep painting underneath the full-screen child. Only
-    // suppress those covered pixels: visibility preserves sizes, scroll position,
-    // iframe browsing contexts and background generation/Helper/MVU execution.
-    const coveredMainStyle = doc.createElement('style');
-    coveredMainStyle.textContent = `html[data-pt-main-covered="true"] :is(#sheld, #chat, #bg1, #bg_custom, #top-bar, #top-settings-holder),
-        html[data-pt-main-covered="true"] :is(#sheld, #chat, #bg1, #bg_custom, #top-bar, #top-settings-holder) * {
-        visibility: hidden !important;
-    }`;
-    doc.head.append(coveredMainStyle);
-    teardown.push(() => { doc.documentElement.removeAttribute('data-pt-main-covered'); coveredMainStyle.remove(); });
     const soundKey = 'parallel-tavern.completion-sound';
     let nightMode = false;
     try { nightMode = host.localStorage.getItem('parallel-tavern.night-mode') === 'on'; } catch {}
@@ -302,7 +173,13 @@
     let menuOpen = false;
     let controlsId = null;
     let launcherSignature = '';
-    let badgeSignature = '';
+    let dockSide = '', dockRatio = 0.5;
+    try {
+        const dock = JSON.parse(host.localStorage.getItem('parallel-tavern.launcher-dock') || 'null');
+        if (['left', 'right'].includes(dock?.side)) dockSide = dock.side;
+        if (Number.isFinite(dock?.ratio)) dockRatio = Math.max(0, Math.min(1, dock.ratio));
+    } catch {}
+    let appHTML = null;
     let renderPending = false;
     let pointerActive = false;
     let lastAction = null;
@@ -447,6 +324,7 @@
     const shell = element('div'); shell.id = 'pt-shell'; shell.dataset.ttMobileSurface = 'none';
     const launcher = button('并行', event => {
         recordPageStage('点击悬浮入口');
+        if (dockSide) { expandLauncher(); panelOpen = true; pickerOpen = false; render(); return; }
         if (enabled && host.__PT_EXTENSION_CONFIG__?.avatarQuickSwitch === true && event.detail > 0) {
             // Pointer capture for dragging retargets clicks to the launcher.
             // Hit-test visible avatars; reverse order respects overlapping faces.
@@ -459,6 +337,17 @@
         panelOpen = !panelOpen; pickerOpen = false; render();
     });
     launcher.id = 'pt-launcher'; launcher.dataset.ttMobileSurface = 'free-window';
+    launcher.dataset.dock = dockSide;
+    style.textContent += `
+#pt-launcher{width:max-content;box-sizing:border-box}
+#pt-launcher[data-dock="left"],#pt-launcher[data-dock="right"]{box-sizing:border-box!important;width:18px!important;min-width:18px!important;max-width:18px!important;height:72px!important;min-height:72px!important;padding:0!important;border:1px solid #b19eab!important;background:#c2adbc!important;box-shadow:0 2px 8px #37293230!important}
+#pt-launcher[data-dock="left"]{border-radius:0 10px 10px 0!important}
+#pt-launcher[data-dock="right"]{border-radius:10px 0 0 10px!important}
+#pt-launcher[data-dock="left"] .pt-dock,#pt-launcher[data-dock="right"] .pt-dock{display:none!important}
+#pt-launcher[data-dock="left"]::after,#pt-launcher[data-dock="right"]::after{content:'';position:absolute;left:7px;top:24px;width:3px;height:24px;border-radius:2px;background:#fff9}
+#pt-launcher[data-dock]:not([data-dock=""])[data-signal="generating"]{background:#f0c44e!important;border-color:#b88722!important}
+#pt-launcher[data-dock]:not([data-dock=""])[data-signal="completed"]{background:#64ba83!important;border-color:#398256!important}
+    `;
     const completionBadge = element('span'); completionBadge.id = 'pt-completion-badge'; completionBadge.hidden = true; completionBadge.setAttribute('aria-hidden', 'true');
     const panel = element('section'); panel.id = 'pt-panel'; panel.hidden = true;
     panel.setAttribute('aria-label', '并行角色会话'); panel.dataset.ttMobileSurface = 'free-window';
@@ -486,6 +375,7 @@
     }
     function positionCompletionBadge() {
         if (completionBadge.hidden) return;
+        if (dockSide) { for (const badge of completionBadge.children) badge.hidden = true; return; }
         const viewport = host.visualViewport;
         const left = viewport?.offsetLeft || 0, top = viewport?.offsetTop || 0;
         const width = viewport?.width || host.innerWidth, height = viewport?.height || host.innerHeight;
@@ -524,15 +414,10 @@
     host.addEventListener('resize', layoutSessions);
     host.visualViewport?.addEventListener('resize', layoutSessions);
     host.visualViewport?.addEventListener('scroll', layoutSessions);
-    let sessionLayoutFrame = null;
-    const scheduleSessionLayout = () => {
-        if (disposed || sessionLayoutFrame !== null) return;
-        sessionLayoutFrame = host.requestAnimationFrame(() => { sessionLayoutFrame = null; if (!disposed) layoutSessions(); });
-    };
-    const sessionSizer = typeof host.ResizeObserver === 'function' ? new host.ResizeObserver(scheduleSessionLayout) : null;
+    const sessionSizer = typeof host.ResizeObserver === 'function' ? new host.ResizeObserver(layoutSessions) : null;
     sessionSizer?.observe(shell);
     teardown.push(() => {
-        sessionSizer?.disconnect(); host.cancelAnimationFrame(sessionLayoutFrame); host.removeEventListener('resize', layoutSessions);
+        sessionSizer?.disconnect(); host.removeEventListener('resize', layoutSessions);
         host.visualViewport?.removeEventListener('resize', layoutSessions);
         host.visualViewport?.removeEventListener('scroll', layoutSessions);
     });
@@ -569,21 +454,50 @@
             }
         } else node.style.removeProperty('display');
     }
+    function saveDock() {
+        try { host.localStorage.setItem('parallel-tavern.launcher-dock', JSON.stringify({ side: dockSide, ratio: dockRatio })); } catch {}
+    }
+    function collapseLauncher(side) {
+        if (!['left', 'right'].includes(side)) return;
+        const b = floatingBounds(), r = launcher.getBoundingClientRect();
+        dockRatio = Math.max(0, Math.min(1, (r.top + r.height / 2 - b.top) / Math.max(1, b.bottom - b.top)));
+        dockSide = side; launcher.dataset.dock = side;
+        launcher.dataset.ptDragged = 'true'; panelOpen = false; pickerOpen = false;
+        saveDock(); render();
+    }
+    function expandLauncher() {
+        if (!dockSide) return;
+        const side = dockSide, b = floatingBounds();
+        dockSide = ''; launcher.dataset.dock = ''; saveDock();
+        const r = launcher.getBoundingClientRect();
+        launcher.style.setProperty('left', `${side === 'left' ? b.left : Math.max(b.left, b.right - r.width)}px`, 'important');
+        launcher.style.setProperty('top', `${Math.max(b.top, Math.min(b.bottom - r.height, b.top + dockRatio * (b.bottom - b.top) - r.height / 2))}px`, 'important');
+        launcher.dataset.ptDragged = 'true';
+    }
     function draggable(node, handle) {
         let drag = null, suppressClick = false;
         node.addEventListener('pointerdown', e => {
-            if (e.button !== 0 || !handle(e.target)) return;
+            if (e.button !== 0 || drag || !handle(e.target)) return;
             const rect = node.getBoundingClientRect();
-            drag = { x: e.clientX, y: e.clientY, left: rect.left, top: rect.top, moved: false };
+            const b = floatingBounds();
+            suppressClick = false;
+            drag = { pointer: e.pointerId, x: e.clientX, y: e.clientY, left: rect.left, top: rect.top, moved: false,
+                docked: node === launcher && !!dockSide,
+                edge: node === launcher ? (rect.left <= b.left + 24 ? 'left' : rect.right >= b.right - 24 ? 'right' : '') : '' };
             node.setPointerCapture?.(e.pointerId);
         });
         node.addEventListener('pointermove', e => {
-            if (!drag) return;
+            if (!drag || e.pointerId !== drag.pointer) return;
             const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
             if (Math.abs(dx) + Math.abs(dy) < 5 && !drag.moved) return;
             drag.moved = true; e.preventDefault();
             node.dataset.ptDragged = 'true';
             const bounds = floatingBounds();
+            if (drag.docked) {
+                const center = drag.top + node.offsetHeight / 2 + dy;
+                dockRatio = Math.max(0, Math.min(1, (center - bounds.top) / Math.max(1, bounds.bottom - bounds.top)));
+                keepFloatingVisible(); return;
+            }
             const left = Math.max(bounds.left, Math.min(bounds.right - node.offsetWidth, drag.left + dx));
             const top = Math.max(bounds.top, Math.min(bounds.bottom - node.offsetHeight, drag.top + dy));
             node.style.setProperty('left', left + 'px', 'important');
@@ -593,8 +507,22 @@
             node.style.setProperty('margin', '0', 'important');
             if (node === launcher) positionCompletionBadge();
         });
-        node.addEventListener('pointerup', () => { suppressClick = !!drag?.moved; drag = null; });
-        node.addEventListener('pointercancel', () => { drag = null; });
+        node.addEventListener('pointerup', e => {
+            if (!drag || e.pointerId !== drag.pointer) return;
+            const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+            const inward = drag.docked && (dockSide === 'left' ? dx >= 28 : dx <= -28);
+            const outward = !drag.docked && (drag.edge === 'left' ? dx <= -28 : drag.edge === 'right' && dx >= 28);
+            suppressClick = !!drag.moved;
+            if (Math.abs(dx) > Math.abs(dy) * 1.2) {
+                if (outward) collapseLauncher(drag.edge);
+                else if (inward) { expandLauncher(); render(); }
+            }
+            if (drag.docked) saveDock();
+            drag = null;
+        });
+        const cancel = e => { if (drag && e.pointerId === drag.pointer) { suppressClick = drag.moved; drag = null; } };
+        node.addEventListener('pointercancel', cancel);
+        node.addEventListener('lostpointercapture', cancel);
         node.addEventListener('click', e => { if (suppressClick) { suppressClick = false; e.preventDefault(); e.stopImmediatePropagation(); } }, true);
     }
     draggable(launcher, () => true);
@@ -614,6 +542,13 @@
             }
             if (node.hidden || !node.offsetHeight) continue;
             const rect = node.getBoundingClientRect();
+            if (node === launcher && dockSide) {
+                const top = Math.max(b.top, Math.min(b.bottom - rect.height, b.top + dockRatio * height - rect.height / 2));
+                set(node, 'top', `${top}px`);
+                set(node, 'left', `${dockSide === 'left' ? b.left - 12 : b.right + 12 - rect.width}px`);
+                set(node, 'right', 'auto'); set(node, 'bottom', 'auto'); set(node, 'margin', '0px');
+                continue;
+            }
             const preferredTop = node.dataset.ptDragged ? rect.top : b.bottom - rect.height - (node === panel ? panelReserve : compact ? 0 : 76);
             const top = Math.max(b.top, Math.min(b.bottom - rect.height, preferredTop));
             const left = Math.max(b.left, Math.min(b.right - rect.width, node.dataset.ptDragged ? rect.left : b.right - rect.width));
@@ -627,12 +562,14 @@
         }
         positionCompletionBadge();
     }
-    let floatingLayoutFrame = null;
-    const scheduleFloatingLayout = () => {
-        if (disposed || floatingLayoutFrame !== null) return;
-        floatingLayoutFrame = host.requestAnimationFrame(() => { floatingLayoutFrame = null; if (!disposed) keepFloatingVisible(); });
+    let floatingLayoutFrame = 0;
+    const requestFloatingLayout = () => {
+        if (disposed || floatingLayoutFrame) return;
+        floatingLayoutFrame = host.requestAnimationFrame(() => { floatingLayoutFrame = 0; keepFloatingVisible(); });
     };
-    const floatObserver = typeof host.ResizeObserver === 'function' ? new host.ResizeObserver(scheduleFloatingLayout) : null;
+    // Dock/undock changes dimensions. Defer observer-driven writes to the next
+    // frame instead of changing observed sizes during WebKit's notification pass.
+    const floatObserver = typeof host.ResizeObserver === 'function' ? new host.ResizeObserver(requestFloatingLayout) : null;
     floatObserver?.observe(panel); floatObserver?.observe(launcher); floatObserver?.observe(toast);
     host.addEventListener('resize', keepFloatingVisible);
     host.visualViewport?.addEventListener('resize', keepFloatingVisible);
@@ -712,18 +649,10 @@
         try {
             const w = session.win, el = chatScroller(w);
             if (!el) return;
-            const scrollTop = el.scrollTop;
-            const bottom = el.scrollHeight - el.clientHeight - scrollTop < 8;
-            // At the bottom there is no anchor to restore: avoid synchronously
-            // measuring every message while switching two live chat documents.
-            if (bottom) {
-                session.reading = { chatId: ctx(w).chatId || ctx(w).getCurrentChatId?.(), scrollTop, bottom: true };
-                return;
-            }
             const top = el === w.document.scrollingElement ? 0 : el.getBoundingClientRect().top + el.clientTop;
             const anchor = [...el.querySelectorAll('.mes[mesid]')].find(n => n.getBoundingClientRect().bottom > top && n.getBoundingClientRect().height > 0);
             session.reading = { chatId: ctx(w).chatId || ctx(w).getCurrentChatId?.(),
-                scrollTop, bottom: false,
+                scrollTop: el.scrollTop, bottom: el.scrollHeight - el.clientHeight - el.scrollTop < 8,
                 mesid: anchor?.getAttribute('mesid'), offset: anchor ? anchor.getBoundingClientRect().top - top : 0 };
         } catch {}
     }
@@ -738,10 +667,9 @@
         const apply = () => {
             if (cancelled || disposed || activeId !== session.id || (ctx(w).chatId || ctx(w).getCurrentChatId?.()) !== saved.chatId) return;
             const el = chatScroller(w); if (!el) return;
-            if (saved.bottom) { el.scrollTo({ top: el.scrollHeight - el.clientHeight, behavior: 'instant' }); return; }
             const anchor = [...el.querySelectorAll('.mes[mesid]')].find(n => n.getAttribute('mesid') === saved.mesid);
             const top = el === w.document.scrollingElement ? 0 : el.getBoundingClientRect().top + el.clientTop;
-            const value = anchor ? el.scrollTop + anchor.getBoundingClientRect().top - top - saved.offset : saved.scrollTop;
+            const value = saved.bottom ? el.scrollHeight - el.clientHeight : anchor ? el.scrollTop + anchor.getBoundingClientRect().top - top - saved.offset : saved.scrollTop;
             el.scrollTo({ top: value, behavior: 'instant' });
         };
         const raf = host.requestAnimationFrame(() => { apply(); });
@@ -760,12 +688,9 @@
             return;
         }
         const switching = activeId !== id;
-        if (switching) recordPageStage(id === 'main' ? '切换到主窗口' : '切换到副窗口');
         if (switching) { sessions.get(activeId)?.profile?.flush(); void sessions.get(id).profile?.activate(); }
         if (switching) { cancelReadingRestore(); rememberReading(sessions.get(activeId)); }
         activeId = id;
-        if (id === 'main') doc.documentElement.removeAttribute('data-pt-main-covered');
-        else doc.documentElement.setAttribute('data-pt-main-covered', 'true');
         sessions.get(id).unreadCompletion = false;
         layoutSessions();
         for (const session of sessions.values()) {
@@ -785,6 +710,7 @@
         const all = [...sessions.values()];
         const running = all.filter(isGenerating).length;
         const completed = enabled ? all.filter(s => s.unreadCompletion) : [];
+        launcher.dataset.signal = running ? 'generating' : completed.length ? 'completed' : 'idle';
         launcher.dataset.completed = String(completed.length);
         const signature = JSON.stringify([enabled, running, completed.length, all.map(s => [s.title, s.avatar])]);
         if (signature !== launcherSignature) {
@@ -798,18 +724,15 @@
             dock.append(faces, label);
             launcher.replaceChildren(dock);
         }
-        const nextBadgeSignature = JSON.stringify(completed.map(session => session.id));
-        if (badgeSignature !== nextBadgeSignature) {
-        badgeSignature = nextBadgeSignature;
         completionBadge.replaceChildren(...completed.map(session => {
             const badge = element('span', 'pt-avatar-badge', '1');
             badge.dataset.ptSession = session.id;
             return badge;
         }));
-        }
-        completionBadge.hidden = completed.length === 0;
-        setFloating(completionBadge, completed.length > 0); positionCompletionBadge();
-        const label = completed.length ? `并行对话：${completed.map(s => s.title).join('、')} 已生成完成，待查看` : '并行对话';
+        completionBadge.hidden = completed.length === 0 || !!dockSide;
+        setFloating(completionBadge, !completionBadge.hidden); positionCompletionBadge();
+        const stateLabel = running ? `${running} 个正在回复${completed.length ? `，${completed.length} 个已完成待查看` : ''}` : completed.length ? `${completed.length} 个已生成完成，待查看` : '空闲';
+        const label = dockSide ? `并行对话侧边条：${stateLabel}，点击展开` : `并行对话：${stateLabel}`;
         launcher.title = label; launcher.setAttribute('aria-label', label);
     }
     function applyTheme() { for (const node of [panel, launcher, toast, completionBadge]) node.dataset.night = String(nightMode); }
@@ -893,6 +816,7 @@
         footer.append(button('退出并行', endParallel), element('span', '', '保持页面开启'), button('设置', () => { menuOpen = !menuOpen; render(); })); panel.append(footer);
         if (menuOpen) {
             const menu = element('div', 'pt-menu');
+            menu.append(button('收至左侧', () => collapseLauncher('left')), button('收至右侧', () => collapseLauncher('right')));
             menu.append(button('复制诊断', exportDiagnostics));
             const theme = button('夜间模式：' + (nightMode ? '开启' : '关闭'), () => setNightMode(!nightMode), '夜间模式');
             theme.setAttribute('role', 'switch'); theme.setAttribute('aria-checked', String(nightMode)); menu.append(theme);
@@ -904,7 +828,7 @@
                 render();
             }, '完成提示音');
             sound.setAttribute('role', 'switch'); sound.setAttribute('aria-checked', String(soundEnabled)); menu.append(sound);
-            const tips = element('details'); tips.append(element('summary', '', '使用说明'), element('p', 'pt-muted', '点击对话行切换窗口；打开对话里可直接进入角色最近聊天，也可选择其他对话。刷新或退出页面会结束这些会话。子会话设置临时生效，永久设置请在主页面修改。')); menu.append(tips); panel.insertBefore(menu, footer);
+            const tips = element('details'); tips.append(element('summary', '', '使用说明'), element('p', 'pt-muted', '点击对话行切换窗口；打开对话里可直接进入角色最近聊天，也可选择其他对话。悬浮窗拖到左边后向左滑、右边后向右滑，可收成侧边条；黄色表示生成中，绿色表示有完成回复待查看，点击展开。刷新或退出页面会结束这些会话。')); menu.append(tips); panel.insertBefore(menu, footer);
         }
     }
     function refreshLiveStatus() {
@@ -1006,12 +930,10 @@
         if (w !== host) session.cleanups.push(bindAudioGesture(w));
         on(c.eventSource, events.GENERATION_STARTED, (_type, _options, dryRun) => {
             if (dryRun) return;
-            recordPageStage(session.id === 'main' ? '主窗口开始生成' : '副窗口开始生成');
             session.unreadCompletion = false;
             session.busy = true; session.status = '生成中'; session.error = null; queueRender();
         }, session);
         on(c.eventSource, events.GENERATION_ENDED, () => {
-            recordPageStage(session.id === 'main' ? '主窗口生成结束' : '副窗口生成结束');
             const wasBusy = session.busy; session.busy = false; session.status = '生成已结束';
             if (wasBusy && enabled) completionSound();
             if (wasBusy && enabled && activeId !== session.id) session.unreadCompletion = true;
@@ -1019,7 +941,6 @@
             if (wasBusy && enabled && activeId !== session.id) notify(`${session.title} 的生成已结束，可以切回查看。`);
         }, session);
         on(c.eventSource, events.GENERATION_STOPPED, () => {
-            recordPageStage(session.id === 'main' ? '主窗口停止生成' : '副窗口停止生成');
             // Native core can still be saving after STOPPED; isBusy also reads it.
             session.busy = false; session.status = '已停止'; queueRender();
         }, session);
@@ -1051,23 +972,6 @@
         try { await ctx(session.win).stopGeneration(); session.status = '正在停止'; queueRender(); }
         catch (error) { notify(`停止失败：${shortError(error)}`); }
     }
-    function releaseChild(session) {
-        session.abort?.abort();
-        host.clearTimeout(session.timeout);
-        runCleanups(session.cleanups);
-        if (session.frame) sessionSizer?.unobserve(session.frame);
-        session.frame?.remove();
-        session.frame = null; session.win = null; session.profile = null;
-    }
-    function failChildSession(session, error, phase = '副窗口加载失败') {
-        if (disposed || sessions.get(session.id) !== session || session.error) return;
-        session.error = shortError(error); session.status = '已停止'; session.phase = phase;
-        session.ready = false; session.busy = false; session.needsConfirmation = false;
-        releaseChild(session);
-        syncIOSCompositing();
-        if (activeId === session.id) setActive('main');
-        recordPageStage(phase); queueRender(); notify(session.error);
-    }
     function closeSession(session) {
         if (session.id === 'main') return;
         if (isBusy(session)) return notify('请先停止或等待这个角色生成、保存结束。');
@@ -1076,9 +980,10 @@
             const input = session.win.document.querySelector('#send_textarea');
             if (input?.value && !host.confirm('这个会话还有未发送的草稿。仍然关闭？')) return;
         }
-        releaseChild(session); sessions.delete(session.id);
-        syncIOSCompositing();
-        recordPageStage('关闭副窗口');
+        host.clearTimeout(session.timeout);
+        for (const clean of session.cleanups) clean();
+        session.frame?.remove(); sessions.delete(session.id);
+        if (session.frame) sessionSizer?.unobserve(session.frame);
         if (activeId === session.id) setActive('main');
         render();
     }
@@ -1089,353 +994,24 @@
         enabled = false; setActive('main'); panelOpen = true; render();
     }
 
-    async function loadHTML(signal) {
-        // The browser owns the HTTP cache. Do not also retain a resolved promise
-        // containing the entire page for the lifetime of the parallel controller.
-        const url = new URL(host.location.href); url.hash = ''; url.search = '';
-        const res = await host.fetch(url.href, { credentials: 'same-origin', signal });
-        if (!res.ok) throw new Error(`无法读取酒馆页面（HTTP ${res.status}）`);
-        const html = await res.text();
-        if (!/<html[\s>]/i.test(html) || !/script/i.test(html)) throw new Error('宿主没有返回酒馆页面 HTML');
-        return html;
+    async function loadHTML() {
+        if (!appHTML) appHTML = (async () => {
+            const url = new URL(host.location.href); url.hash = ''; url.search = '';
+            const res = await host.fetch(url.href, { credentials: 'same-origin' });
+            if (!res.ok) throw new Error(`无法读取酒馆页面（HTTP ${res.status}）`);
+            const html = await res.text();
+            if (!/<html[\s>]/i.test(html) || !/script/i.test(html)) throw new Error('宿主没有返回酒馆页面 HTML');
+            return html;
+        })().catch(error => { appHTML = null; throw error; });
+        return appHTML;
     }
 
     // This prelude executes BEFORE native scripts in each child document. It uses the
     // existing TT bridge, retains native stream parsing, and isolates settings.
-    // TT 2.3.0 lifecycle compatibility. Execute this function in the target realm.
-    // It preserves renderer scripts, MVU state and the host's existing budget policy.
-    function installTauriRuntimeCompatibility(win) {
-        const noop = () => {};
-        if (typeof window === 'undefined' || win !== window) return noop;
-        let isTauri = !!(win.__TAURI_RUNNING__ || win.__TAURITAVERN__ || win.__TAURI__);
-        try { isTauri ||= win.parent !== win && !!(win.parent.__TAURI_RUNNING__ || win.parent.__TAURITAVERN__); } catch {}
-        if (!isTauri) return noop;
-    
-        const key = '__TAURITAVERN_EMBEDDED_RUNTIME__';
-        const originalDescriptor = Object.getOwnPropertyDescriptor(win, key);
-        const patchedManagers = new WeakSet();
-        const restorers = [];
-        let live = true;
-        let adapterPromise = null;
-        const localElement = element => element instanceof win.HTMLElement && element.ownerDocument === win.document;
-        const isMissing = (error, id) => error?.message === `EmbeddedRuntimeManager.invalidate(${id}): slot not found`;
-        const loadAdapter = () => adapterPromise ||= import(new win.URL(
-            'tauri/main/adapters/embedded-runtime/js-slash-runner-runtime-adapter.js',
-            win.document.baseURI || win.location.href,
-        ).href).then(module => module.createJsSlashRunnerRuntimeAdapter()).catch(error => {
-            adapterPromise = null;
-            throw error;
-        });
-    
-        const patchManager = manager => {
-            if (!live || !manager || typeof manager !== 'object' || patchedManagers.has(manager)) return manager;
-            if (typeof manager.register !== 'function' || typeof manager.invalidate !== 'function') return manager;
-            const registerDescriptor = Object.getOwnPropertyDescriptor(manager, 'register');
-            const invalidateDescriptor = Object.getOwnPropertyDescriptor(manager, 'invalidate');
-            if (!registerDescriptor?.writable || !invalidateDescriptor?.writable) return manager;
-            const originalRegister = manager.register;
-            const originalInvalidate = manager.invalidate;
-            const repairs = new Map();
-    
-            const register = function(slot) {
-                if (!live || !slot || typeof slot !== 'object' || !localElement(slot.element)) {
-                    return originalRegister.apply(this, arguments);
-                }
-                const id = String(slot.id ?? '').trim();
-                const element = slot.element;
-                const visibilityTarget = localElement(slot.visibilityTarget) ? slot.visibilityTarget : element;
-                const disposeSlot = slot.dispose;
-                const wrapped = { ...slot, dispose: function(...args) {
-                    const result = typeof disposeSlot === 'function' ? disposeSlot.apply(this, args) : undefined;
-                    // The manager's internal unregister closure also invokes this
-                    // dispose. Wrapping only manager.unregister misses that path.
-                    if (live) {
-                        for (const target of [element, visibilityTarget]) {
-                            if (target.dataset.ttRuntimeSlotId === id) delete target.dataset.ttRuntimeSlotId;
-                        }
-                    }
-                    return result;
-                } };
-                return originalRegister.call(this, wrapped);
-            };
-    
-            const invalidate = function(id) {
-                try { return originalInvalidate.apply(this, arguments); }
-                catch (error) {
-                    if (!live || !isMissing(error, id)) throw error;
-                    const chat = win.document.getElementById('chat');
-                    if (!localElement(chat)) throw error;
-                    const findHosts = () => [...chat.querySelectorAll('.TH-render[data-tt-runtime-slot-id]')]
-                        .filter(host => localElement(host) && host.dataset.ttRuntimeSlotId === id && host.querySelector('iframe'));
-                    // Do not hide genuine missing-slot API misuse. Recover only a
-                    // live JSR wrapper carrying this exact stale DOM marker.
-                    if (!findHosts().length) throw error;
-                    if (repairs.has(id)) return;
-                    const repair = loadAdapter().then(adapter => {
-                        if (!live) return;
-                        // Another owner may have registered the ID while loading.
-                        try { originalInvalidate.call(manager, id); return; }
-                        catch (retryError) { if (!isMissing(retryError, id)) throw retryError; }
-                        for (const host of findHosts()) {
-                            delete host.dataset.ttRuntimeSlotId;
-                            // This uses the official source/identity/iframe slot
-                            // implementation; it does not replace the live iframe.
-                            adapter.registerHost(manager, host);
-                        }
-                    }).catch(repairError => {
-                        if (live) win.console.error('Parallel Tavern: TT runtime lifecycle recovery failed', repairError);
-                    }).finally(() => repairs.delete(id));
-                    repairs.set(id, repair);
-                    return;
-                }
-            };
-    
-            manager.register = register;
-            manager.invalidate = invalidate;
-            patchedManagers.add(manager);
-            restorers.push(() => {
-                if (manager.register === register) manager.register = originalRegister;
-                if (manager.invalidate === invalidate) manager.invalidate = originalInvalidate;
-            });
-            return manager;
-        };
-    
-        let current = patchManager(win[key]);
-        let getter = null;
-        // TT assigns its public manager once during async bootstrap. Catch that
-        // assignment without polling or installing a second DOM observer.
-        if (!originalDescriptor || (originalDescriptor.configurable && 'value' in originalDescriptor && originalDescriptor.writable)) {
-            getter = () => current;
-            Object.defineProperty(win, key, {
-                configurable: true,
-                enumerable: originalDescriptor?.enumerable ?? true,
-                get: getter,
-                set: next => { current = patchManager(next); },
-            });
-        }
-    
-        return function disposeTauriRuntimeCompatibility() {
-            if (!live) return;
-            live = false;
-            for (const restore of restorers.splice(0)) restore();
-            if (getter && Object.getOwnPropertyDescriptor(win, key)?.get === getter) {
-                Object.defineProperty(win, key, {
-                    configurable: originalDescriptor?.configurable ?? true,
-                    enumerable: originalDescriptor?.enumerable ?? true,
-                    writable: originalDescriptor?.writable ?? true,
-                    value: current,
-                });
-            }
-        };
-    }
-
-    // TT emits APP_READY before activating deferred third-party extensions;
-    // ST extensions can also have asynchronous APP_READY initialization.
-    // This runs as a static module before the host entry, because extension
-    // completion is not replayed by TT's EventEmitter to late subscribers.
-    function observeChildStartupEvents(eventSource, events) {
-        const startup = window.__PT_BOOT_TRACE__.startup;
-        startup.observerInstalled = true;
-        let stopped = false;
-        const notify = () => {
-            if (stopped) return;
-            try { window.parent.__PARALLEL_TAVERN_V2__?.attachChild(window, window.__PT_CHILD_ID__); } catch {}
-        };
-        const extensionEvent = events.EXTENSION_SETTINGS_LOADED || 'extension_settings_loaded';
-        const appEvent = events.APP_READY || 'app_ready';
-        const originalEmit = eventSource.emit;
-        function emitWithStartupCompletion(...args) {
-            const result = Reflect.apply(originalEmit, this, args);
-            // Only observe this child's two startup events. Other events keep
-            // their original return value, receiver, arguments and timing.
-            if (stopped || this !== eventSource || (args[0] !== appEvent && args[0] !== extensionEvent)) return result;
-            // TT awaits asynchronous listeners. An ordinary first/last listener
-            // or a setTimeout would not guarantee those listeners have finished.
-            return Promise.resolve(result).then(value => {
-                if (!stopped) {
-                    if (args[0] === appEvent) startup.appReady = true;
-                    // A runtime install can emit with a manifest argument; only
-                    // the no-argument startup batch marks all extensions loaded.
-                    if (args[0] === extensionEvent && args.length === 1) startup.extensionsLoaded = true;
-                    notify();
-                    if (startup.appReady && (startup.extensionsLoaded || startup.extensionsEnabled === false)) dispose();
-                }
-                return value;
-            });
-        }
-        const dispose = () => {
-            if (stopped) return;
-            stopped = true;
-            // A third party may have wrapped our function in the meantime.
-            // Never overwrite that wrapper; our inactive layer just forwards.
-            if (eventSource.emit === emitWithStartupCompletion) eventSource.emit = originalEmit;
-            window.removeEventListener('pagehide', leaving);
-        };
-        const leaving = event => { if (!event.persisted) dispose(); };
-        window.__PT_STARTUP_EVENTS_DISPOSE__ = dispose;
-        window.addEventListener('pagehide', leaving);
-        eventSource.emit = emitWithStartupCompletion;
-        notify();
-    }
-
-    /**
-     * Rewrite only the effective top-level settings envelope in a bootstrap JSON body.
-     * The common path validates JSON grammar without constructing the character library.
-     * Deep input or a missing envelope uses the original parse/transform/stringify path.
-     * No transform is invoked until the complete input has been validated.
-     */
-    function isolateBootstrapJSON(text, transform) {
-        if (typeof text !== 'string') throw new TypeError('Bootstrap JSON must be a string');
-        if (typeof transform !== 'function') throw new TypeError('Settings transform must be a function');
-        const fallback = {};
-        const maxDepth = 128;
-        let position = 0;
-        let settingsStart = -1;
-        let settingsEnd = -1;
-        const invalid = () => { throw new SyntaxError(`Invalid bootstrap JSON at position ${position}`); };
-        const whitespace = () => {
-            while (position < text.length) {
-                const code = text.charCodeAt(position);
-                if (code !== 32 && code !== 9 && code !== 10 && code !== 13) break;
-                position++;
-            }
-        };
-        const digit = code => code >= 48 && code <= 57;
-        const string = () => {
-            if (text.charCodeAt(position++) !== 34) invalid();
-            while (position < text.length) {
-                const code = text.charCodeAt(position++);
-                if (code === 34) return;
-                if (code < 32) invalid();
-                if (code !== 92) continue;
-                const escaped = text.charCodeAt(position++);
-                if (escaped === 117) {
-                    for (let count = 0; count < 4; count++) {
-                        const hex = text.charCodeAt(position++);
-                        if (!digit(hex) && !(hex >= 65 && hex <= 70) && !(hex >= 97 && hex <= 102)) invalid();
-                    }
-                } else if (![34, 92, 47, 98, 102, 110, 114, 116].includes(escaped)) invalid();
-            }
-            invalid();
-        };
-        const number = () => {
-            const numberStart = position;
-            if (text.charCodeAt(position) === 45) position++;
-            const first = text.charCodeAt(position);
-            if (first === 48) position++;
-            else if (first >= 49 && first <= 57) {
-                do { position++; } while (digit(text.charCodeAt(position)));
-            } else invalid();
-            if (text.charCodeAt(position) === 46) {
-                position++;
-                if (!digit(text.charCodeAt(position))) invalid();
-                do { position++; } while (digit(text.charCodeAt(position)));
-            }
-            const exponent = text.charCodeAt(position);
-            if (exponent === 69 || exponent === 101) {
-                position++;
-                const sign = text.charCodeAt(position);
-                if (sign === 43 || sign === 45) position++;
-                if (!digit(text.charCodeAt(position))) invalid();
-                do { position++; } while (digit(text.charCodeAt(position)));
-            }
-            // The old whole-payload stringify normalizes negative zero and Infinity.
-            // Preserve that behavior rather than changing unrelated numeric values.
-            if (first === 48 || exponent === 69 || exponent === 101 || position - numberStart > 308) {
-                const numeric = Number(text.slice(numberStart, position));
-                if (!Number.isFinite(numeric) || Object.is(numeric, -0)) throw fallback;
-            }
-        };
-        const value = depth => {
-            if (depth > maxDepth) throw fallback;
-            const start = text.charCodeAt(position);
-            if (start === 34) { string(); return; }
-            if (start === 123) {
-                position++; whitespace();
-                if (text.charCodeAt(position) === 125) { position++; return; }
-                while (true) {
-                    const keyStart = position;
-                    string();
-                    const keyEnd = position;
-                    whitespace();
-                    if (text.charCodeAt(position++) !== 58) invalid();
-                    whitespace();
-                    const memberStart = position;
-                    value(depth + 1);
-                    if (depth === 0 && JSON.parse(text.slice(keyStart, keyEnd)) === 'settings') {
-                        // JSON.parse uses the last duplicate key, including escaped keys.
-                        settingsStart = memberStart; settingsEnd = position;
-                    }
-                    whitespace();
-                    const separator = text.charCodeAt(position++);
-                    if (separator === 125) return;
-                    if (separator !== 44) invalid();
-                    whitespace();
-                }
-            }
-            if (start === 91) {
-                position++; whitespace();
-                if (text.charCodeAt(position) === 93) { position++; return; }
-                while (true) {
-                    value(depth + 1); whitespace();
-                    const separator = text.charCodeAt(position++);
-                    if (separator === 93) return;
-                    if (separator !== 44) invalid();
-                    whitespace();
-                }
-            }
-            for (const literal of ['true', 'false', 'null']) {
-                if (text.startsWith(literal, position)) { position += literal.length; return; }
-            }
-            number();
-        };
-        const legacy = () => {
-            const payload = JSON.parse(text);
-            if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new TypeError('Bootstrap payload must be an object');
-            payload.settings = transform(payload.settings);
-            return JSON.stringify(payload);
-        };
-        whitespace();
-        if (text.charCodeAt(position) !== 123) return legacy();
-        try {
-            value(0); whitespace();
-            if (position !== text.length) invalid();
-        } catch (error) {
-            if (error === fallback) return legacy();
-            throw error;
-        }
-        if (settingsStart < 0) return legacy();
-        const transformed = transform(JSON.parse(text.slice(settingsStart, settingsEnd)));
-        // Preserve JSON.stringify's toJSON key ('settings'), omission, and error behavior.
-        const envelope = JSON.stringify({ settings: transformed });
-        if (envelope === '{}') {
-            const payload = JSON.parse(text);
-            delete payload.settings;
-            return JSON.stringify(payload);
-        }
-        const replacement = envelope.slice('{"settings":'.length, -1);
-        return text.slice(0, settingsStart) + replacement + text.slice(settingsEnd);
-    }
-
-    function childPrelude(id, avatar, baseURL, protectExisting, installRuntimeCompatibility, rewriteBootstrapJSON) {
+    function childPrelude(id, avatar, baseURL, protectExisting) {
         const parentHost = window.parent;
-        const onFinalPageHide = cleanup => {
-            const leaving = event => {
-                if (event.persisted) return;
-                window.removeEventListener('pagehide', leaving);
-                cleanup();
-            };
-            window.addEventListener('pagehide', leaving);
-        };
         window.__PT_CHILD_ID__ = id;
-        if (typeof installRuntimeCompatibility === 'function') {
-            const dispose = installRuntimeCompatibility(window);
-            window.__PT_RUNTIME_COMPAT_DISPOSE__ = dispose;
-            onFinalPageHide(dispose);
-        }
         const trace = window.__PT_BOOT_TRACE__ = { requests: [], resourceErrors: {} };
-        trace.startup = { tauri: !!(parentHost.__TAURITAVERN__ || parentHost.__TAURI_RUNNING__),
-            extensionsEnabled: null, extensionsLoaded: false, appReady: false, observerInstalled: false };
         trace.chatProtection = { existingHistory: !!protectExisting, blockedWrites: 0, verified: false };
         window.__PT_CHAT_WRITE_READY__ = !protectExisting;
         const guardChatWrite = () => {
@@ -1498,24 +1074,16 @@
         function errorDetails(error, file, line, column) {
             const message = String(error?.message || '');
             const kind = /content security|unsafe-eval|unsafe-inline/i.test(message) ? 'CSP' : /fetch|network|load.*module/i.test(message) ? 'RESOURCE_OR_NETWORK' : /not defined/.test(message) ? 'UNDEFINED_GLOBAL' : /Cannot read|Cannot set|undefined|null/.test(message) ? 'MISSING_VALUE' : /not a function/.test(message) ? 'MISSING_FUNCTION' : 'RUNTIME_ERROR';
-            const basename = value => { try { const part = new URL(value, baseURL).pathname.split('/').pop(); return /^[\w.-]+\.(?:m?js|html)$/.test(part) ? part.slice(0, 100) : '(inline)'; } catch { return '(unknown)'; } };
+            const basename = value => { try { const part = new URL(value, baseURL).pathname.split('/').pop(); return /^[\w.-]+\.(?:m?js|html)$/.test(part) ? part : '(inline)'; } catch { return '(unknown)'; } };
             const frames = [...String(error?.stack || '').matchAll(/((?:https?|tauri|asset):\/\/[^\s)]+?):(\d+):(\d+)/g)].slice(0, 5).map(m => ({ file: basename(m[1]), line: Number(m[2]), column: Number(m[3]) }));
             const inputFailure = message === 'Expected #send_textarea to exist';
             if (inputFailure) trace.inputAtError = inputState();
-            return { name: ['Error','TypeError','ReferenceError','SyntaxError','RangeError','URIError','EvalError','AggregateError'].includes(error?.name) ? error.name : 'Error', kind: inputFailure ? 'CHAT_INPUT_MISSING' : kind,
+            return { name: String(error?.name || 'Error').slice(0, 60), kind: inputFailure ? 'CHAT_INPUT_MISSING' : kind,
                 file: file ? basename(file) : null, line: Number(line) || null, column: Number(column) || null, frames };
         }
         report('子页面引导脚本已执行');
         window.addEventListener('error', e => {
-            if (e.target?.tagName === 'SCRIPT') {
-                let requiredEntry = e.target.id === 'pt-startup-events';
-                try {
-                    const source = new URL(e.target.src, baseURL), entry = new URL('script.js', baseURL);
-                    requiredEntry ||= source.origin === entry.origin && (source.pathname === entry.pathname
-                        || source.pathname === new URL('init.js', baseURL).pathname);
-                } catch {}
-                report('脚本资源加载失败', { ...errorDetails(null, e.target.src), kind: requiredEntry ? 'CORE_SCRIPT_LOAD_FAILED' : 'SCRIPT_LOAD_FAILED' });
-            }
+            if (e.target?.tagName === 'SCRIPT') report('脚本资源加载失败', { ...errorDetails(null, e.target.src), kind: 'SCRIPT_LOAD_FAILED' });
             else if (e.target !== window) {
                 const tag = e.target?.tagName || 'OTHER';
                 trace.resourceErrors[tag] = (trace.resourceErrors[tag] || 0) + 1;
@@ -1530,27 +1098,7 @@
         };
         // Tauri does not consistently inject its JS API into same-origin frames.
         // Public Tauri functions keep their original callback registry in parent.
-        const bridgeBytes = trace.bridgeBytes = { arrayBuffers: 0, uint8Arrays: 0, copiedBytes: 0, largestCopyBytes: 0 };
-        const copied = bytes => { bridgeBytes.copiedBytes += bytes; bridgeBytes.largestCopyBytes = Math.max(bridgeBytes.largestCopyBytes, bytes); };
-        const nativeCalls = trace.nativeCalls = { started: 0, pending: 0, peakPending: 0, failed: 0, recent: [] };
-        // Record categories only. Never retain command arguments, paths, URLs or payloads.
-        const commandCategory = command => /^(plugin:fs\||read_chat_bytes$|open_chat_backup_download$)/.test(command) ? 'file'
-            : command === 'plugin:resources|close' ? 'resource-close'
-            : /tokeniz/.test(command) ? 'tokenizer' : /settings/.test(command) ? 'settings'
-            : /chat/.test(command) ? 'chat' : /extension/.test(command) ? 'extension' : 'other';
-        trace.mainThread = { supported: false, longTasks: 0, longestMs: 0 };
-        let performanceObserver;
-        try {
-            if (window.PerformanceObserver?.supportedEntryTypes?.includes('longtask')) {
-                performanceObserver = new PerformanceObserver(list => {
-                    for (const entry of list.getEntries()) { trace.mainThread.longTasks++; trace.mainThread.longestMs = Math.max(trace.mainThread.longestMs, Math.round(entry.duration)); }
-                });
-                performanceObserver.observe({ entryTypes: ['longtask'] }); trace.mainThread.supported = true;
-            }
-        } catch {}
-        const diagnosticStopTimer = setTimeout(() => performanceObserver?.disconnect(), 90000);
-        window.__PT_DIAGNOSTICS_STOP__ = () => { performanceObserver?.disconnect(); clearTimeout(diagnosticStopTimer); };
-        onFinalPageHide(window.__PT_DIAGNOSTICS_STOP__);
+        const bridgeBytes = trace.bridgeBytes = { arrayBuffers: 0, uint8Arrays: 0 };
         function localizeBinary(value) {
             if (value instanceof ArrayBuffer || value instanceof Uint8Array) return value;
             // Keep IPC and callback ownership in the parent. Only the returned
@@ -1558,12 +1106,12 @@
             try {
                 Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get.call(value);
                 const copy = new Uint8Array(new Uint8Array(value));
-                bridgeBytes.arrayBuffers++; copied(copy.byteLength);
+                bridgeBytes.arrayBuffers++;
                 return copy.buffer;
             } catch {}
             if (ArrayBuffer.isView(value) && Object.prototype.toString.call(value) === '[object Uint8Array]') {
                 const copy = new Uint8Array(value);
-                bridgeBytes.uint8Arrays++; copied(copy.byteLength);
+                bridgeBytes.uint8Arrays++;
                 return copy;
             }
             return value;
@@ -1574,55 +1122,9 @@
                 const childApi = Object.create(api), childCore = Object.create(core);
                 Object.defineProperty(childCore, 'invoke', { value: async (...args) => {
                     if (/^(?:(?:begin|append|finish)_chat_commit|(?:save|write|append|truncate|delete|rename|commit)_(?:character_|group_)?chat(?:_|$))/.test(args[0])) guardChatWrite();
-                    const entry = { category: commandCategory(String(args[0])), state: 'pending', started: Date.now() };
-                    nativeCalls.started++; nativeCalls.pending++; nativeCalls.peakPending = Math.max(nativeCalls.peakPending, nativeCalls.pending);
-                    nativeCalls.recent.push(entry); if (nativeCalls.recent.length > 12) nativeCalls.recent.shift();
-                    try { const result = localizeBinary(await core.invoke(...args)); entry.state = 'resolved'; return result; }
-                    catch (error) { entry.state = 'rejected'; nativeCalls.failed++; throw error; }
-                    finally { nativeCalls.pending--; entry.elapsedMs = Date.now() - entry.started; }
+                    return localizeBinary(await core.invoke(...args));
                 }, configurable: true });
                 Object.defineProperty(childApi, 'core', { value: childCore, configurable: true });
-                // The inherited public event API registers callbacks in the
-                // parent realm. Removing an iframe alone does not release them.
-                const eventApi = api.event;
-                if (typeof eventApi?.listen === 'function') {
-                    const stops = new Set();
-                    let closed = false;
-                    const events = trace.bridgeEvents = { active: 0, pending: 0, cleanupErrors: 0 };
-                    const release = fn => {
-                        try { return Promise.resolve(fn()).catch(() => { events.cleanupErrors++; }); }
-                        catch { events.cleanupErrors++; return Promise.resolve(); }
-                    };
-                    const subscribe = async (event, handler, options, once = false) => {
-                        if (closed) throw new Error('Parallel session already closed');
-                        let off = null, stopped = false;
-                        const stop = () => {
-                            if (stopped) return;
-                            stopped = true; stops.delete(stop); events.active = stops.size;
-                            if (off) return release(off);
-                        };
-                        events.pending++;
-                        try {
-                            off = await eventApi.listen(event, value => {
-                                if (closed || stopped) return;
-                                if (once) void stop();
-                                handler(value);
-                            }, options);
-                            if (closed || stopped) { stopped = true; await release(off); }
-                            else { stops.add(stop); events.active = stops.size; }
-                            return stop;
-                        } finally { events.pending--; }
-                    };
-                    const childEvents = Object.create(eventApi);
-                    Object.defineProperty(childEvents, 'listen', { value: (event, handler, options) => subscribe(event, handler, options), configurable: true });
-                    Object.defineProperty(childEvents, 'once', { value: (event, handler, options) => subscribe(event, handler, options, true), configurable: true });
-                    Object.defineProperty(childApi, 'event', { value: childEvents, configurable: true });
-                    window.__PT_BRIDGE_DISPOSE__ = () => {
-                        closed = true;
-                        for (const stop of [...stops]) void stop();
-                    };
-                    onFinalPageHide(window.__PT_BRIDGE_DISPOSE__);
-                }
                 window.__TAURI__ = childApi;
             } else window.__TAURI__ = api;
         }
@@ -1630,43 +1132,6 @@
         const originalFetch = window.fetch.bind(window);
         const isTT = !!parentHost.__TAURITAVERN__ || !!parentHost.__TAURI_RUNNING__;
         let localRevision = null;
-        const bootDataError = message => {
-            // The host may catch a failed startup fetch without APP_READY or
-            // unhandledrejection. Report our own fatal validation explicitly.
-            report('副窗口启动数据无效', { kind: 'BOOT_DATA_INVALID' });
-            const error = new Error(message);
-            error.ptBootDataInvalid = true;
-            return error;
-        };
-        const readStartupJSON = async response => {
-            try { return await response.json(); }
-            catch { throw bootDataError('副窗口启动数据无法解析，已停止并释放窗口。'); }
-        };
-        // TT 2.x supplies this settings envelope inside /api/bootstrap instead
-        // of /api/settings/get. Both startup paths must receive the same local
-        // settings, before their native autoloadLastChat can run.
-        const isolateSettingsPayload = payload => {
-            if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw bootDataError('启动设置返回异常，已停止副窗口。');
-            if (trace.startup.extensionsEnabled === null) {
-                // Match TT's bootstrap predicate, including first-run/no-settings.
-                trace.startup.extensionsEnabled = !!payload.enable_extensions
-                    && payload.result !== 'file not find' && !!payload.settings;
-            }
-            payload.enable_extensions_auto_update = false;
-            if (payload.hash_algorithm && payload.settings_hash) localRevision = { hash_algorithm: payload.hash_algorithm, settings_hash: payload.settings_hash };
-            else if (payload.tauritavern_settings_revision) localRevision = payload.tauritavern_settings_revision;
-            const serialized = typeof payload.settings === 'string';
-            let settings;
-            try { settings = serialized ? JSON.parse(payload.settings) : payload.settings; }
-            catch { throw bootDataError('启动设置无法解析，已停止副窗口。'); }
-            if (settings && typeof settings === 'object' && !Array.isArray(settings)) {
-                // Open the verified target after app and extension startup, rather
-                // than loading the parent's last chat during child startup.
-                settings.active_character = null; settings.active_group = null;
-                payload.settings = serialized ? JSON.stringify(settings) : settings;
-            }
-            return payload;
-        };
         // A host extension may wrap our fetch then assign it back. Mark the
         // options (not HTTP headers) so nested wrappers parse settings only once.
         const fetchPass = Symbol('parallel-tavern-fetch-pass');
@@ -1675,7 +1140,6 @@
             init = { ...init, [fetchPass]: true };
             const url = new URL(typeof input === 'string' || input instanceof URL ? String(input) : input.url, baseURL);
             const method = String(init.method || input?.method || 'GET').toUpperCase();
-            const local = url.origin === new URL(baseURL).origin;
             if (url.origin === new URL(baseURL).origin && method !== 'GET' && /\/api\/chats\/(save|save-metadata|rename|delete)$/.test(url.pathname)) guardChatWrite();
             if (url.origin === new URL(baseURL).origin && url.pathname.endsWith('/csrf-token')) {
                 const headers = parentHost.SillyTavern?.getContext()?.getRequestHeaders?.();
@@ -1688,122 +1152,38 @@
             // Only route names and status/timing are retained: never bodies, query
             // strings, headers, API addresses or user filenames.
             let request = null;
-            if ((!window.__PT_BOOT_DONE__ || Date.now() < (window.__PT_DIAGNOSTIC_UNTIL__ || 0)) && url.origin === new URL(baseURL).origin) {
+            if (!window.__PT_BOOT_DONE__ && url.origin === new URL(baseURL).origin) {
                 const match = url.pathname.match(/^\/api\/(settings|secrets|extensions|presets|characters|backgrounds|avatars|tokenizers|worldinfo|chats|users)\/([a-z-]+)$/);
-                const route = match ? `/api/${match[1]}/${match[2]}` : ['/version','/csrf-token','/api/bootstrap'].includes(url.pathname) ? url.pathname : '(other local resource)';
+                const route = match ? `/api/${match[1]}/${match[2]}` : ['/version','/csrf-token'].includes(url.pathname) ? url.pathname : '(other local resource)';
                 if (route !== '(other local resource)' && trace.requests.length >= 80) { const i = trace.requests.findIndex(r => r.state !== 'pending'); if (i >= 0) trace.requests.splice(i, 1); }
                 if (route !== '(other local resource)' && trace.requests.length < 80) { request = { route, state: 'pending', started: Date.now() }; trace.requests.push(request); }
             }
             let response;
             try { response = await next(input, init); if (request) { request.state = 'responded'; request.status = response.status; request.elapsedMs = Date.now() - request.started; } }
             catch (error) { if (request) { request.state = 'rejected'; request.elapsedMs = Date.now() - request.started; } throw error; }
-            if (local && url.pathname.endsWith('/api/bootstrap') && response.ok) {
-                // Isolate startup settings while preserving the host's character
-                // library and other data used by third-party extensions.
-                let isolated;
-                try {
-                    const text = await response.text();
-                    trace.startup.bootstrapChars = text.length;
-                    // Preserve the character library as JSON text. Only settings
-                    // need a temporary object graph before the host consumes it.
-                    isolated = rewriteBootstrapJSON(text, isolateSettingsPayload);
-                } catch (error) {
-                    if (error?.ptBootDataInvalid) throw error;
-                    throw bootDataError('启动数据无法解析，已停止并释放副窗口。');
+            if (url.origin === new URL(baseURL).origin && url.pathname.endsWith('/api/settings/get') && response.ok) {
+                const payload = await response.clone().json();
+                if (payload.hash_algorithm && payload.settings_hash) localRevision = { hash_algorithm: payload.hash_algorithm, settings_hash: payload.settings_hash };
+                else if (payload.tauritavern_settings_revision) localRevision = payload.tauritavern_settings_revision;
+                if (typeof payload.settings === 'string') {
+                    const settings = JSON.parse(payload.settings);
+                    // Open the verified target explicitly after APP_READY, rather
+                    // than letting startup silently load/create a stale chat.
+                    settings.active_character = null; settings.active_group = null;
+                    payload.settings = JSON.stringify(settings);
+                    return new Response(JSON.stringify(payload), { status: response.status, headers: { 'Content-Type': 'application/json' } });
                 }
-                return new Response(isolated, { status: response.status, headers: { 'Content-Type': 'application/json' } });
-            }
-            if (local && url.pathname.endsWith('/api/settings/get') && response.ok) {
-                // This response is replaced, so consume it once. clone() tees
-                // the body and leaves a second large settings buffer unread.
-                const payload = isolateSettingsPayload(await readStartupJSON(response));
-                return new Response(JSON.stringify(payload), { status: response.status, headers: { 'Content-Type': 'application/json' } });
             }
             return response;
         };
         // Keep settings isolation when the host installs its supported fetch patch.
         let settingsFetch = wrapFetch(isTT ? parentHost.fetch.bind(parentHost) : originalFetch);
         Object.defineProperty(window, 'fetch', { configurable: true, get: () => settingsFetch, set: next => { if (next !== settingsFetch) settingsFetch = wrapFetch(next); } });
-        // Startup events notify the parent directly. Its cancellable watcher is
-        // the fallback; do not run a second polling loop in every child realm.
-    }
-
-    function configureChildImageLoading(parsed) {
-        // Configure native list templates before the host clones them and assigns
-        // avatar URLs. Do not strip src or delay message/card/Helper images whose
-        // load events and intrinsic dimensions may be part of a running script.
-        const images = parsed.querySelectorAll('#character_template .avatar > img, #user_avatar_template .avatar > img, #group_member_template .avatar > img');
-        for (const img of images) {
-            if (!img.hasAttribute('loading')) img.setAttribute('loading', 'lazy');
-            if (!img.hasAttribute('decoding')) img.setAttribute('decoding', 'async');
-        }
-    }
-
-    async function selectChildHistory(character, avatar, targetChat, signal) {
-        const response = await host.fetch(new URL('api/characters/chats', host.location.href).href, {
-            method: 'POST', headers: ctx(host).getRequestHeaders(),
-            body: JSON.stringify({ avatar_url: avatar, ch_name: character.name }), signal,
-        });
-        if (!response.ok) throw new Error('无法确认历史聊天，已停止打开副窗口，以免误建新档。');
-        const history = await response.json();
-        if (!history || typeof history !== 'object' || history.error) throw new Error('聊天列表返回异常，已停止打开副窗口。');
-        const fileName = chat => chat.file_name.replace(/\.jsonl$/i, '');
-        const historyTime = chat => {
-            const raw = String(chat.last_mes || '');
-            const match = raw.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/)
-                || chat.file_name.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/);
-            return chatTimestamp(chat.last_mes) || (match ? Date.parse(match[1] + 'T' + match[2] + ':' + match[3] + ':' + match[4]) : 0) || 0;
-        };
-        let chosen = null, latestTime = -Infinity;
-        // Keep the first item on equal timestamps, matching the previous stable sort.
-        // Validate every entry before allowing a new chat, without copying/sorting lists.
-        for (const chat of Object.values(history)) {
-            if (!chat || typeof chat.file_name !== 'string') throw new Error('无法识别聊天列表，已停止打开，未创建新档。');
-            if (targetChat) {
-                if (!chosen && fileName(chat) === targetChat) chosen = chat;
-            } else {
-                const time = historyTime(chat);
-                if (!chosen || time > latestTime) { chosen = chat; latestTime = time; }
-            }
-        }
-        if (targetChat && !chosen) throw new Error('指定聊天已不在历史列表中，已停止打开，未创建新档。');
-        return { targetChat: chosen ? fileName(chosen) : null,
-            existingHistory: !!chosen, expectedMessages: Number(chosen?.chat_items) || 0 };
-    }
-
-    async function prepareChildPage(s, avatar) {
-        const html = await loadHTML(s.abort.signal);
-        if (disposed || sessions.get(s.id) !== s || s.error || s.abort.signal.aborted) return null;
-        s.phase = 'HTML 已读取，准备子页面';
-        // This temporary document stays in a separate preparation scope. Session
-        // listeners must not retain it while the real host and extensions start.
-        const parsed = new host.DOMParser().parseFromString(html, 'text/html');
-        configureChildImageLoading(parsed);
-        s.sourceInput = { count: parsed.querySelectorAll('#send_textarea').length,
-            tag: parsed.querySelector('#send_textarea')?.tagName || null };
-        if (s.sourceInput.count !== 1 || s.sourceInput.tag !== 'TEXTAREA') {
-            throw new Error('读取的宿主页面缺少唯一的聊天输入框，已停止启动副窗口。请复制诊断。');
-        }
-        parsed.querySelectorAll('base').forEach(n => n.remove());
-        const base = parsed.createElement('base'); base.href = host.location.href;
-        const bootstrap = parsed.createElement('script');
-        bootstrap.textContent = `(${childPrelude.toString()})(${JSON.stringify(s.id)},${JSON.stringify(avatar)},${JSON.stringify(host.location.href)},${s.existingHistory},${installTauriRuntimeCompatibility.toString()},${isolateBootstrapJSON.toString()});`.replace(/<\/script/gi, '<\\/script');
-        {
-            const startupEvents = parsed.createElement('script');
-            startupEvents.type = 'module'; startupEvents.id = 'pt-startup-events';
-            // A static import, not an asynchronous import/poll: execute before
-            // the host entry even when extension completion precedes APP_READY.
-            startupEvents.textContent = `import { eventSource, event_types } from ${JSON.stringify(new URL('scripts/events.js', host.location.href).href)}; (${observeChildStartupEvents.toString()})(eventSource, event_types);`;
-            parsed.head.prepend(startupEvents);
-        }
-        parsed.head.prepend(bootstrap); parsed.head.prepend(base);
-        if (iosBrowser) {
-            const reduced = parsed.createElement('style'); reduced.id = 'pt-ios-compositing';
-            reduced.textContent = iosCompositingCSS;
-            // Present before the first render; no repeated DOM/style polling.
-            parsed.head.append(reduced);
-        }
-        return '<!DOCTYPE html>\n' + parsed.documentElement.outerHTML;
+        const timer = setInterval(() => {
+            if (!window.SillyTavern?.getContext) return;
+            if (parentHost.__PARALLEL_TAVERN_V2__?.attachChild(window, id)) clearInterval(timer);
+        }, 50);
+        window.addEventListener('pagehide', () => clearInterval(timer), { once: true });
     }
 
     async function openCharacter(avatar, chatName = null) {
@@ -1821,51 +1201,56 @@
         }
         if ([...sessions.values()].some(s => s.id !== 'main' && !s.ready && !s.error)) return notify('有一个副窗口正在加载，请等它就绪后再添加。');
         const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-        const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, cleanups: [], abort: new host.AbortController() };
+        const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, cleanups: [] };
         // Reserve before awaiting, so fast double clicks cannot create duplicates.
-        sessions.set(id, s); syncIOSCompositing(); panelOpen = true; pickerOpen = false; render();
+        sessions.set(id, s); panelOpen = true; pickerOpen = false; render();
         recordPageStage('开始打开副窗口');
         try {
             s.phase = '确认已有聊天记录';
-            Object.assign(s, await selectChildHistory(character, avatar, targetChat, s.abort.signal));
-            if (disposed || sessions.get(id) !== s || s.abort.signal.aborted) return;
+            const historyResponse = await host.fetch(new URL('api/characters/chats', host.location.href).href, {
+                method: 'POST', headers: ctx(host).getRequestHeaders(), body: JSON.stringify({ avatar_url: avatar, ch_name: character.name }),
+            });
+            if (!historyResponse.ok) throw new Error('无法确认历史聊天，已停止打开副窗口，以免误建新档。');
+            const history = await historyResponse.json();
+            if (!history || typeof history !== 'object' || history.error) throw new Error('聊天列表返回异常，已停止打开副窗口。');
+            const chats = Object.values(history).filter(c => c && typeof c.file_name === 'string');
+            if (Object.values(history).length !== chats.length) throw new Error('无法识别聊天列表，已停止打开，未创建新档。');
+            const fileName = c => c.file_name.replace(/\.jsonl$/i, '');
+            if (targetChat && !chats.some(c => fileName(c) === targetChat)) throw new Error('指定聊天已不在历史列表中，已停止打开，未创建新档。');
+            const historyTime = chat => {
+                const raw = String(chat.last_mes || '');
+                const match = raw.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/)
+                    || chat.file_name.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/);
+                return chatTimestamp(chat.last_mes) || (match ? Date.parse(`${match[1]}T${match[2]}:${match[3]}:${match[4]}`) : 0) || 0;
+            };
+            const latest = [...chats].sort((a, b) => historyTime(b) - historyTime(a));
+            const chosen = targetChat ? chats.find(c => fileName(c) === targetChat)
+                : latest[0];
+            s.targetChat = chosen ? fileName(chosen) : null;
+            s.existingHistory = !!chosen;
+            s.expectedMessages = Number(chosen?.chat_items) || 0;
             s.phase = '读取宿主 HTML';
             recordPageStage('读取副窗口页面');
-            let bootHTML = await prepareChildPage(s, avatar);
-            if (disposed || sessions.get(id) !== s || s.error || s.abort.signal.aborted) return;
-            recordPageStage('副窗口 HTML 已准备');
-            // Leave the temporary parser/history scope before booting another full
-            // host. Yield once so the browser can paint and reclaim eligible data;
-            // document.open/write/close below remain one synchronous operation.
-            await new Promise(resolve => host.setTimeout(resolve, 0));
-            if (disposed || sessions.get(id) !== s || s.error || s.abort.signal.aborted) return;
+            const html = await loadHTML();
+            s.phase = 'HTML 已读取，准备子页面';
+            if (!sessions.has(id) || disposed) return;
+            const parsed = new host.DOMParser().parseFromString(html, 'text/html');
+            s.sourceInput = { count: parsed.querySelectorAll('#send_textarea').length,
+                tag: parsed.querySelector('#send_textarea')?.tagName || null };
+            if (s.sourceInput.count !== 1 || s.sourceInput.tag !== 'TEXTAREA') {
+                appHTML = null;
+                throw new Error('读取的宿主页面缺少唯一的聊天输入框，已停止启动副窗口。请复制诊断。');
+            }
+            parsed.querySelectorAll('base').forEach(n => n.remove());
+            const base = parsed.createElement('base'); base.href = host.location.href;
+            const bootstrap = parsed.createElement('script');
+            bootstrap.textContent = `(${childPrelude.toString()})(${JSON.stringify(id)},${JSON.stringify(avatar)},${JSON.stringify(host.location.href)},${s.existingHistory});`.replace(/<\/script/gi, '<\\/script');
+            parsed.head.prepend(bootstrap); parsed.head.prepend(base);
             const frame = element('iframe', 'pt-frame pt-hidden'); frame.title = `并行角色：${character.name}`;
             frame.name = `pt-${id}`; frame.id = `pt-frame-${id}`;
-            frame.dataset.ptSessionId = id;
             frame.dataset.ttMobileSurface = 'viewport-host'; frame.setAttribute('aria-hidden', 'true');
             s.frame = frame;
             s.cleanups.push(() => frame.contentWindow?.__PT_SETTINGS_DISPOSE__?.());
-            s.cleanups.push(() => frame.contentWindow?.__PT_STARTUP_EVENTS_DISPOSE__?.());
-            // A reload would fetch the original host HTML without our prelude.
-            // Stop that session instead of letting an unisolated second app run.
-            let guardedDocument = null;
-            const navigationError = () => failChildSession(s, '副窗口发生了刷新或导航，已释放该窗口以防重复启动。请关闭此会话卡片后重新打开。', '副窗口导航已拦截');
-            const checkDocument = () => {
-                if (disposed || !sessions.has(id) || s.error || frame.dataset.ptBootWritten !== 'yes') return;
-                try {
-                    const w = frame.contentWindow;
-                    if (w.__PT_CHILD_ID__ !== id || (guardedDocument && guardedDocument !== w.document)) return navigationError();
-                    if (!guardedDocument) {
-                        guardedDocument = w.document;
-                        for (const clean of [w.__PT_BRIDGE_DISPOSE__, w.__PT_DIAGNOSTICS_STOP__, w.__PT_RUNTIME_COMPAT_DISPOSE__, w.__PT_STARTUP_EVENTS_DISPOSE__]) if (typeof clean === 'function') s.cleanups.push(clean);
-                        const leaving = event => { if (!event.persisted) navigationError(); };
-                        w.addEventListener('pagehide', leaving);
-                        s.cleanups.push(() => w.removeEventListener('pagehide', leaving));
-                    }
-                } catch { navigationError(); }
-            };
-            frame.addEventListener('load', checkDocument);
-            s.cleanups.push(() => frame.removeEventListener('load', checkDocument));
             shell.append(frame);
             recordPageStage('初始化副窗口');
             layoutSessions(); sessionSizer?.observe(frame);
@@ -1873,79 +1258,36 @@
             // document the actual app URL. TT and ST use location.origin/href.
             // Only the HTML fetched from this user's own host is evaluated.
             const writer = doc.createElement('script');
-            // Hand over data, not a second huge JavaScript string literal. The
-            // old writer escaped and compiled the entire host HTML again before
-            // the browser could parse it as HTML, increasing startup allocations.
-            Object.defineProperty(frame, '__PT_BOOT_HTML__', { configurable: true,
-                value: bootHTML });
-            bootHTML = null;
+            const pageHTML = '<!DOCTYPE html>\n' + parsed.documentElement.outerHTML;
             // Only the child document boot requires a script in the host realm.
             // The launcher and script button no longer depend on inline injection.
             writer.textContent = `{
                 const f = document.getElementById(${JSON.stringify(frame.id)});
-                const html = f.__PT_BOOT_HTML__;
-                delete f.__PT_BOOT_HTML__;
                 f.contentDocument.open();
-                f.contentDocument.write(html);
+                f.contentDocument.write(${JSON.stringify(pageHTML)});
                 f.contentDocument.close();
                 f.dataset.ptBootWritten = 'yes';
             }`;
-            try { doc.head.append(writer); }
-            finally { delete frame.__PT_BOOT_HTML__; writer.remove(); }
+            doc.head.append(writer); writer.remove();
             recordPageStage('副窗口页面已写入');
             if (frame.dataset.ptBootWritten !== 'yes') throw new Error('宿主阻止了子会话启动脚本。并行面板可用，但此环境暂不能打开并行会话。');
-            checkDocument();
-            if (s.error || !sessions.has(id) || disposed) return;
-            watchChildStartup(s);
+            const watch = host.setInterval(() => {
+                if (s.ready || !sessions.has(id) || disposed) { host.clearInterval(watch); return; }
+                try { attachChild(frame.contentWindow, id); revealStartupPopup(s); } catch {}
+            }, 250);
+            s.cleanups.push(() => host.clearInterval(watch));
             armLoadWarning(s);
         } catch (error) {
-            failChildSession(s, error);
+            recordPageStage('副窗口加载失败');
+            s.status = '加载失败'; s.error = shortError(error); queueRender(); notify(s.error);
         }
-    }
-
-    function watchChildStartup(s) {
-        let timer = null, stopped = false;
-        const live = () => !disposed && sessions.get(s.id) === s && !s.ready && !s.error && !s.abort?.signal.aborted;
-        const stop = () => {
-            stopped = true;
-            host.clearTimeout(timer); timer = null;
-            doc.removeEventListener('visibilitychange', visibility);
-            if (s.stopStartupWatch === stop) delete s.stopStartupWatch;
-        };
-        const tick = () => {
-            timer = null;
-            if (stopped) return;
-            if (!live()) { stop(); return; }
-            if (doc.visibilityState === 'hidden') return;
-            try {
-                attachChild(s.frame?.contentWindow, s.id);
-                if (live()) revealStartupPopup(s);
-            } catch { /* Native startup may not have exposed its document yet. */ }
-            if (!live()) { stop(); return; }
-            // Events drive readiness; after attachment only check for native
-            // confirmation dialogs and hosts whose startup events were missed.
-            timer = host.setTimeout(tick, s.attached ? 1000 : 250);
-        };
-        const visibility = () => {
-            host.clearTimeout(timer); timer = null;
-            host.clearTimeout(s.timeout);
-            if (stopped || !live()) { stop(); return; }
-            if (doc.visibilityState !== 'hidden') { tick(); armLoadWarning(s); }
-        };
-        s.stopStartupWatch = stop;
-        s.cleanups.push(stop);
-        doc.addEventListener('visibilitychange', visibility);
-        tick();
     }
 
     function armLoadWarning(s) {
         host.clearTimeout(s.timeout);
-        if (disposed || sessions.get(s.id) !== s || s.ready || s.error || s.needsConfirmation || doc.visibilityState === 'hidden') return;
         s.timeout = host.setTimeout(() => {
-            if (!disposed && sessions.get(s.id) === s && !s.ready && !s.error && !s.needsConfirmation && doc.visibilityState !== 'hidden') {
-                s.startupSlow = true;
-                const status = '加载较慢，可继续等待或关闭窗口后重试';
-                if (s.status !== status) { s.status = status; queueRender(); }
+            if (!s.ready && !s.error && !s.needsConfirmation) {
+                s.status = '加载较慢，仍在等待'; queueRender();
             }
         }, 60000);
     }
@@ -1973,42 +1315,21 @@
 
     function attachChild(w, id) {
         const s = sessions.get(id);
-        if (disposed || !s || s.error || s.abort?.signal.aborted || !w || s.frame?.contentWindow !== w) return false;
-        if (s.attached) { s.resumeStartup?.(); return true; }
+        if (!s || s.frame?.contentWindow !== w) return false;
+        if (s.attached) return true;
         if (!w.SillyTavern?.getContext) return false;
         try {
             const c = ctx(w), events = c.eventTypes || c.event_types;
             if (!c.eventSource?.on || !events || typeof c.selectCharacterById !== 'function') return false;
             s.win = w; s.phase = '已找到聊天上下文，等待 APP_READY';
-            const startup = w.__PT_BOOT_TRACE__?.startup;
-            const requiresExtensions = !!startup;
             const ready = () => {
-                if (s.openStarted || s.ready || s.error || s.abort?.signal.aborted || sessions.get(id) !== s || disposed) return;
-                s.appReadyReceived ||= startup?.appReady === true;
-                if (!s.extensionsLoaded && startup?.extensionsLoaded === true) {
-                    s.extensionsLoaded = true;
-                    if (iosBrowser) recordPageStage('副窗口扩展加载完成');
-                }
-                if (!(requiresExtensions ? startup?.appReady === true : s.appReadyReceived)) return;
-                if (requiresExtensions && startup?.extensionsEnabled !== false && startup?.extensionsLoaded !== true) {
-                    if (!s.needsConfirmation) {
-                        const status = s.startupSlow ? '加载较慢，可继续等待或关闭窗口后重试' : '正在等待扩展加载…';
-                        const phase = '页面已启动，等待第三方扩展加载完成';
-                        if (s.status !== status || s.phase !== phase) {
-                            s.status = status; s.phase = phase; queueRender();
-                        }
-                    }
-                    return;
-                }
-                // Both events can be replayed or observed more than once.
-                // Reserve before scheduling so they cannot race target loading.
-                s.openStarted = true;
+                s.appReadyReceived = true;
                 if (!s.error) s.status = '正在打开角色…';
                 // Keep request diagnostics running through target chat loading.
-                s.phase = '宿主启动完成，正在打开目标角色';
-                // Don't block native event dispatch with character navigation.
-                const openTimer = host.setTimeout(async () => {
-                    if (sessions.get(id) !== s || disposed || s.ready || s.error || s.abort?.signal.aborted) return;
+                s.phase = 'APP_READY 已触发，正在打开目标角色';
+                // Don't block native APP_READY dispatch with character navigation.
+                host.setTimeout(async () => {
+                    if (!sessions.has(id) || disposed || s.ready) return;
                     try {
                         const latest = ctx(w);
                         if (typeof latest.selectCharacterById !== 'function') throw new Error('当前版本缺少 selectCharacterById 接口');
@@ -2018,7 +1339,6 @@
                         // field before loading the character's full card.
                         if (s.targetChat) latest.characters[index].chat = s.targetChat;
                         await latest.selectCharacterById(index, s.targetChat ? { chatFile: s.targetChat } : {});
-                        if (sessions.get(id) !== s || disposed || s.error || s.abort?.signal.aborted) return;
                         const loaded = ctx(w);
                         if (loaded.characters[loaded.characterId]?.avatar !== s.targetAvatar) throw new Error('目标角色未成功打开，已保留原会话');
                         if (s.targetChat) {
@@ -2026,12 +1346,11 @@
                             if (current !== s.targetChat) {
                                 if (typeof loaded.openCharacterChat !== 'function') throw new Error('宿主缺少打开指定聊天记录的接口');
                                 await loaded.openCharacterChat(s.targetChat);
-                                if (sessions.get(id) !== s || disposed || s.error || s.abort?.signal.aborted) return;
                             }
                             const verified = ctx(w);
                             if ((verified.chatId || verified.getCurrentChatId?.()) !== s.targetChat) throw new Error('目标聊天记录未成功打开，请重试');
                         }
-                        if (!sessions.has(id) || disposed || s.error) return;
+                        if (!sessions.has(id) || disposed) return;
                         if (s.existingHistory) {
                             const verified = ctx(w);
                             if (w.__PT_BOOT_TRACE__?.chatProtection?.blockedWrites) throw new Error('加载期间出现了写入历史记录的尝试，已拦截并停止副窗口。请复制诊断。');
@@ -2042,41 +1361,19 @@
                         w.__PT_CHAT_WRITE_READY__ = true;
                         if (w.__PT_BOOT_TRACE__?.chatProtection) w.__PT_BOOT_TRACE__.chatProtection.verified = true;
                         w.__PT_BOOT_DONE__ = true;
-                        w.__PT_DIAGNOSTIC_UNTIL__ = Date.now() + 30000;
                         s.needsConfirmation = false; s.lastStartupPopup = null;
                         s.ready = true; s.phase = '就绪'; s.status = '待命'; s.error = null;
-                        host.clearTimeout(s.timeout); s.stopStartupWatch?.(); attachSession(s);
+                        host.clearTimeout(s.timeout); attachSession(s);
                         await s.profile?.ready;
-                        if (!sessions.has(id) || disposed || s.error || !s.frame) return;
+                        if (!sessions.has(id) || disposed) return;
                         identity(s); setActive(id);
                         recordPageStage('副窗口就绪');
-                        for (const seconds of [1, 3, 8, 15, 30]) {
-                            const checkpoint = host.setTimeout(() => {
-                                if (!disposed && sessions.get(id) === s) {
-                                    recordPageStage(`副窗口就绪后 ${seconds} 秒`);
-                                    if (seconds === 30) w.__PT_DIAGNOSTICS_STOP__?.();
-                                }
-                            }, seconds * 1000);
-                            s.cleanups.push(() => host.clearTimeout(checkpoint));
-                        }
-                    } catch (error) { failChildSession(s, error, '目标聊天读取失败'); }
+                    } catch (error) { host.clearTimeout(s.timeout); s.status = '加载失败'; s.error = shortError(error); s.phase = '目标聊天读取失败'; queueRender(); notify(s.error); }
                 }, 0);
-                s.cleanups.push(() => host.clearTimeout(openTimer));
             };
-            s.resumeStartup = ready;
-            s.cleanups.push(() => { delete s.resumeStartup; });
-            // Set before subscribing: cached APP_READY may call us synchronously.
-            s.attached = true;
-            on(c.eventSource, events.EXTENSION_SETTINGS_LOADED || 'extension_settings_loaded', () => {
-                if (!requiresExtensions) s.extensionsLoaded = true;
-                ready();
-            }, s);
-            on(c.eventSource, events.APP_INITIALIZED || 'app_initialized', () => {
-                s.appInitializedReceived = true;
-                if (!s.openStarted && !s.ready && !s.appReadyReceived) s.phase = 'APP_INITIALIZED 已触发，等待启动收尾';
-            }, s);
-            on(c.eventSource, events.APP_READY || 'app_ready', () => { s.appReadyReceived = true; ready(); }, s);
-            ready(); return true;
+            on(c.eventSource, events.APP_INITIALIZED || 'app_initialized', () => { s.appInitializedReceived = true; s.phase = 'APP_INITIALIZED 已触发，等待启动收尾'; }, s);
+            on(c.eventSource, events.APP_READY || 'app_ready', ready, s);
+            s.attached = true; return true;
         } catch { s.phase = '聊天上下文尚未可用，等待重试'; return false; }
     }
 
@@ -2088,14 +1385,11 @@
             s.lastErrorPhase = String(phase).slice(0, 100);
             s.issues ||= [];
             if (s.issues.length < 15) s.issues.push(typeof issue === 'object' ? JSON.parse(JSON.stringify(issue)) : String(issue).slice(0, 100));
-            if (iosBrowser && s.issues.length <= 3) recordPageStage('副窗口执行错误');
             if (!s.ready && issue?.kind === 'CHAT_INPUT_MISSING') {
-                // Let the reporting script finish before disposing its document.
-                host.setTimeout(() => failChildSession(s, 'TT 初始化时未找到有效聊天输入框，已释放副窗口。', '输入框初始化失败'), 0);
-            } else if (!s.ready && issue?.kind === 'BOOT_DATA_INVALID') {
-                host.setTimeout(() => failChildSession(s, '副窗口的启动设置或角色数据无效，已释放窗口。请刷新主页面角色列表后重试。', '副窗口启动数据无效'), 0);
-            } else if (!s.ready && issue?.kind === 'CORE_SCRIPT_LOAD_FAILED') {
-                host.setTimeout(() => failChildSession(s, '宿主聊天入口脚本加载失败，已释放副窗口。请关闭此会话卡片后重新打开。', '宿主入口加载失败'), 0);
+                host.clearTimeout(s.timeout);
+                s.phase = '输入框初始化失败'; s.status = '加载失败';
+                s.error = 'TT 初始化时未找到有效聊天输入框。请复制诊断，无需再等 60 秒。';
+                queueRender();
             }
         }
     }
@@ -2109,10 +1403,8 @@
                 hostABI: !!w.__TAURITAVERN__, sillyTavern: !!w.SillyTavern?.getContext,
                 scriptCount: w.document.scripts.length, originMatches: w.location.origin === host.location.origin,
                 input: w.__PT_INPUT_STATE__?.() || null,
-                loading: bootSnapshot(w),
                 boot: w.__PT_BOOT_TRACE__ ? { resourceErrors: w.__PT_BOOT_TRACE__.resourceErrors,
                     bridgeBytes: w.__PT_BOOT_TRACE__.bridgeBytes || null,
-                    bridgeEvents: w.__PT_BOOT_TRACE__.bridgeEvents || null,
                     chatProtection: w.__PT_BOOT_TRACE__.chatProtection || null,
                     inputCompat: w.__PT_BOOT_TRACE__.inputCompat || null,
                     inputAtDOMContentLoaded: w.__PT_BOOT_TRACE__.inputAtDOMContentLoaded || null,
@@ -2129,12 +1421,8 @@
             script: 'Parallel Tavern', version: VERSION,
             host: host.__TAURITAVERN__ || host.__TAURI_RUNNING__ ? 'TauriTavern' : 'SillyTavern / browser',
             platformABI: host.__TAURITAVERN__?.abiVersion ?? null,
-            hostAppVersion, cleanupErrors, mainErrors: { ...mainErrors },
             startupTiming: { ...startupTiming },
-            diagnosticStorage: { ...diagnosticStorage }, lastParallelPageStage,
-            lastParallelPageStageScope: 'same-origin; may belong to another tab; not proof of a crash',
-            iosFixedLayer: iosBrowser, iosReducedCompositing: !!mainCompositingStyle, previousPageStage, currentPageStage,
-            navigationType: host.performance?.getEntriesByType?.('navigation')?.[0]?.type || null,
+            iosFixedLayer: iosBrowser, previousPageStage,
             launcherVisible, enabled, appReady, activeSession: activeId, lastAction,
             sessions: [...sessions.values()].map(s => ({ id: s.id, ready: s.ready, busy: isBusy(s), generating: isGenerating(s), saving: isSaving(s), generationEventActive: !!s.busy, nativeGenerating: s.win?.__PT_CORE__?.is_send_press === true, status: s.status, error: s.error || null, hasCore: !!s.win?.__PT_CORE__, needsConfirmation: !!s.needsConfirmation, attached: !!s.attached, appInitializedReceived: !!s.appInitializedReceived, appReadyReceived: !!s.appReadyReceived, phase: s.phase || null, lastErrorPhase: s.lastErrorPhase || null, sourceInput: s.sourceInput || null, issues: s.issues || [], child: childState(s) })),
             // Deliberately exclude prompts, messages, names, URLs and credentials.
@@ -2167,20 +1455,17 @@
     function dispose() {
         if ([...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { notify('子会话仍在运行，请先停止或等待完成再卸载。'); return false; }
         disposed = true;
-        for (const s of sessions.values()) {
-            if (s.id === 'main') { host.clearTimeout(s.timeout); runCleanups(s.cleanups); }
-            else releaseChild(s);
-        }
-        sessions.clear();
-        runCleanups(teardown);
+        for (const s of sessions.values()) { host.clearTimeout(s.timeout); for (const clean of s.cleanups) clean(); s.frame?.remove(); }
+        for (const clean of teardown) clean();
         host.clearTimeout(toastTimer);
         for (const e of [style, shell, launcher, panel, picker, toast, completionBadge]) e.remove();
         delete host[KEY]; return true;
     }
     host[KEY] = {
-        version: VERSION, owner, claim: token => { host[KEY].owner = token; disposeRequested = false; syncRefresh(); },
+        version: VERSION, owner, claim: token => { host[KEY].owner = token; disposeRequested = false; },
         show: () => {
             recordPageStage('打开悬浮面板');
+            expandLauncher();
             // QR is also a recovery entrance for stale/offscreen mobile coordinates.
             for (const node of [launcher, panel]) {
                 delete node.dataset.ptDragged;
@@ -2206,55 +1491,22 @@
         requestDispose: () => {
             disposeRequested = true;
             if (![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) dispose();
-            else { syncRefresh(); notify('脚本已停用，将在现有生成结束后移除并行界面。'); }
+            else notify('脚本已停用，将在现有生成结束后移除并行界面。');
         },
     };
-    teardown.push(installTauriRuntimeCompatibility(host));
     attachSession(main);
     const events = ctx(host).eventTypes || ctx(host).event_types;
     on(ctx(host).eventSource, events.APP_READY || 'app_ready', () => { appReady = true; queueRender(); }, main);
-    let refresh = null;
-    const refreshTick = () => {
+    const refresh = host.setInterval(() => {
         if (disposeRequested && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { dispose(); return; }
-        if (doc.visibilityState !== 'hidden') refreshLiveStatus();
-    };
-    function syncRefresh() {
-        // One owner/handle across every background/foreground cycle. Keep only
-        // pending-disposal checks alive while a hidden child is still generating.
-        const needed = !disposed && (doc.visibilityState !== 'hidden' || disposeRequested);
-        if (!needed && refresh !== null) { host.clearInterval(refresh); refresh = null; }
-        else if (needed && refresh === null) refresh = host.setInterval(refreshTick, 1000);
-    }
-    syncRefresh();
-    teardown.push(() => { host.clearInterval(refresh); refresh = null; });
+        refreshLiveStatus();
+    }, 1000);
+    teardown.push(() => host.clearInterval(refresh));
     const unload = event => {
         if ([...sessions.values()].some(isBusy)) { event.preventDefault(); event.returnValue = ''; }
     };
     host.addEventListener('beforeunload', unload);
-    const visibilityChanged = () => {
-        recordPageStage(doc.visibilityState === 'hidden' ? '页面转入后台' : '页面回到前台');
-        syncRefresh();
-        if (doc.visibilityState === 'hidden') {
-            host.cancelAnimationFrame(sessionLayoutFrame); sessionLayoutFrame = null;
-        } else {
-            refreshTick();
-            if (!disposed) { layoutSessions(); queueRender(); }
-        }
-    };
-    doc.addEventListener('visibilitychange', visibilityChanged);
-    teardown.push(() => doc.removeEventListener('visibilitychange', visibilityChanged));
-    const leaving = event => {
-        currentPageStage = { ...currentPageStage, pageExitObserved: true, pageExitTime: Date.now(), persisted: !!event.persisted };
-        persistStage();
-    };
-    const resumed = event => {
-        if (!event.persisted) return;
-        currentPageStage = { ...currentPageStage, pageExitObserved: false, pageExitTime: null, persisted: false };
-        recordPageStage('页面从缓存恢复');
-        syncRefresh();
-    };
-    host.addEventListener('pageshow', resumed);
-    teardown.push(() => host.removeEventListener('pageshow', resumed));
+    const leaving = () => { try { host.sessionStorage.setItem('parallel-tavern.last-stage', JSON.stringify({ ...currentPageStage, pageExitObserved: true })); } catch {} };
     host.addEventListener('pagehide', leaving, true);
     teardown.push(() => host.removeEventListener('pagehide', leaving, true));
     teardown.push(() => host.removeEventListener('beforeunload', unload));

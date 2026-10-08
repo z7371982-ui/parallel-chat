@@ -7,7 +7,7 @@ const KEY = 'parallel_tavern';
 const CONTROLLER = '__PARALLEL_TAVERN_V2__';
 
 // Child pages show settings too, but only the main page starts the runtime.
-if ((window.__PT_CHILD_ID__ || !window.parent.__PT_CHILD_ID__) && !(window.frameElement?.dataset.ptSessionId && !window.__PT_CHILD_ID__)) {
+if (window.__PT_CHILD_ID__ || !window.parent.__PT_CHILD_ID__) {
     void initialize().catch(error => {
         console.error('[Parallel Tavern extension]', error);
         const status = document.getElementById('pt-extension-status');
@@ -40,7 +40,7 @@ async function initialize() {
     root.innerHTML = `
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
-                <b>并行对话 · 0.5.17</b>
+                <b>并行对话 · 0.5.6-r1</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
@@ -48,12 +48,12 @@ async function initialize() {
                     <input id="pt-extension-show-launcher" type="checkbox">
                     <span>显示悬浮窗</span>
                 </label>
-                <small>关闭后隐藏悬浮入口；已打开的会话仍可继续生成。</small>
+                <small>拖到左边向左滑、右边向右滑，可收为侧边条，点击展开。黄色：生成中；绿色：有完成回复待查看。关闭入口后会话仍可继续生成。</small>
                 <label class="checkbox_label" for="pt-extension-avatar-switch"><input id="pt-extension-avatar-switch" type="checkbox"><span>点击悬浮头像切换对话</span></label>
                 <small>默认关闭。开启后点击头像直达对应窗口，点击文字区域仍打开面板。</small>
                 <label class="checkbox_label" for="pt-extension-night"><input id="pt-extension-night" type="checkbox"><span>夜间模式</span></label>
-                <label class="checkbox_label" for="pt-extension-character-settings"><input id="pt-extension-character-settings" type="checkbox"><span>按角色记住预设与模型</span></label>
-                <small>同一角色的不同聊天共用选择；已有窗口再次切入时恢复，正在生成时不更换。不复制 API 密钥或预设文件。</small>
+                <label class="checkbox_label" for="pt-extension-character-settings"><input id="pt-extension-character-settings" type="checkbox"><span>按角色记住预设、模型与代理</span></label>
+                <small>同时记住代理预设、地址和密码，保存在当前酒馆的扩展设置。旧角色需重新选一次正确代理。同一角色的不同聊天共用配置，正在生成或保存时不更换；服务商 API 密钥仍由酒馆管理。</small>
                 <div><button type="button" class="menu_button" id="pt-extension-open">打开并行面板</button></div>
                 <small id="pt-extension-status" role="status"></small>
             </div>
@@ -87,11 +87,9 @@ async function initialize() {
     const disposeSettings = () => {
         owner.removeEventListener('pt-extension-settings', sync);
         owner.removeEventListener('pt-night-mode', sync);
-        window.removeEventListener('pagehide', leaving);
     };
-    const leaving = event => { if (!event.persisted) disposeSettings(); };
     window.__PT_SETTINGS_DISPOSE__ = disposeSettings;
-    window.addEventListener('pagehide', leaving);
+    window.addEventListener('pagehide', disposeSettings, { once: true });
     checkbox.addEventListener('change', () => {
         settings.showLauncher = checkbox.checked;
         persist();

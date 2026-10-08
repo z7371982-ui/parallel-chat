@@ -1,4 +1,5 @@
-// Store selection references only, never API credentials or copies of presets.
+// Proxy credentials are explicitly remembered per character in host extension
+// settings. Provider secrets and complete prompt/connection presets are not copied.
 const chatControls = {
     makersuite: ['google_model', 'model_google_select'],
     custom: ['custom_model', 'custom_model_id'],
@@ -21,7 +22,14 @@ function selection(context, doc) {
         : [`${source}_model`, textControls[source] || `${source}_model`];
     // Unknown/custom hosts retain their normal behavior instead of guessing a control.
     if (!doc.getElementById(id) || typeof settings[key] !== 'string') return null;
-    return { api, source, preset, model: settings[key], key, control: id };
+    const value = { api, source, preset, model: settings[key], key, control: id };
+    if (api === 'openai' && typeof settings.reverse_proxy === 'string' && typeof settings.proxy_password === 'string') {
+        value.proxy = {
+            preset: doc.getElementById('openai_proxy_preset')?.value || null,
+            url: settings.reverse_proxy, password: settings.proxy_password,
+        };
+    }
+    return value;
 }
 
 export function installCharacterProfiles(win, { settings, save, busy, notify }) {
@@ -30,8 +38,9 @@ export function installCharacterProfiles(win, { settings, save, busy, notify }) 
     const events = context().eventTypes || context().event_types || {};
     const emitter = context().eventSource;
     const cleanups = [];
-    let stopped = false, applying = false, timer, observed, observedAvatar, queue = Promise.resolve();
-    let waitingPreset = false, pendingEdit = false;
+    let stopped = false, applying = false, timer, resumeTimer, observed, observedAvatar, queue = Promise.resolve();
+    let waitingPreset = false, pendingEdit = false, restoreFailed = false;
+    const legacyNotices = new Set();
     const enabled = () => settings.rememberCharacterSettings !== false;
     const read = () => selection(context(), win.document);
     const signature = value => JSON.stringify(value);
@@ -65,14 +74,39 @@ export function installCharacterProfiles(win, { settings, save, busy, notify }) 
         if (win.jQuery) win.jQuery(node).val(value).trigger(node.tagName === 'SELECT' ? 'change' : 'input');
         else { node.value = value; node.dispatchEvent(new win.Event(node.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); }
     }
+    const sameSelection = (saved, current) => !!current &&
+        ['api', 'source', 'preset', 'model'].every(key => saved[key] === current[key]) &&
+        (!saved.proxy || !!current.proxy && ['preset', 'url', 'password'].every(key => saved.proxy[key] === current.proxy[key]));
+    function restoreProxy(proxy) {
+        if (!proxy) return;
+        if (typeof proxy.url !== 'string' || typeof proxy.password !== 'string') throw new Error('保存的代理配置不完整，请重新选择代理');
+        const doc = win.document;
+        const passwordId = ['openai_proxy_password', 'openai_proxy_access_key'].find(id => doc.getElementById(id));
+        const urlNode = doc.getElementById('openai_reverse_proxy');
+        if (!passwordId || !urlNode) throw new Error('当前酒馆缺少代理地址或密码控件');
+        const preset = doc.getElementById('openai_proxy_preset');
+        if (proxy.preset && (!preset || ![...preset.options].some(o => o.value === proxy.preset))) {
+            throw new Error('保存的代理预设已不存在，请重新选择代理');
+        }
+        // Native preset change restores its own address/password. Then restore the
+        // character snapshot, including an explicitly empty password, in this realm.
+        if (proxy.preset && preset.value !== proxy.preset) setControl(preset.id, proxy.preset);
+        const apiSettings = context().chatCompletionSettings;
+        if (apiSettings.reverse_proxy !== proxy.url) setControl(urlNode.id, proxy.url);
+        if (apiSettings.proxy_password !== proxy.password) setControl(passwordId, proxy.password);
+        if (apiSettings.reverse_proxy !== proxy.url || apiSettings.proxy_password !== proxy.password ||
+            proxy.preset && preset.value !== proxy.preset) throw new Error('宿主未接受保存的代理配置');
+    }
     async function restore() {
         if (stopped || !enabled() || busy()) return;
         const id = avatar();
         if (!id) { observedAvatar = null; return; }
         const value = Object.hasOwn(settings.characterProfiles || {}, id) ? settings.characterProfiles[id] : null;
         const existing = read();
-        if (value && existing && ['api', 'source', 'preset', 'model'].every(key => value[key] === existing[key])) {
+        if (value && sameSelection(value, existing)) {
             observedAvatar = id; observed = signature(existing); pendingEdit = false;
+            restoreFailed = false;
+            warnLegacy(value, id);
             return;
         }
         applying = true;
@@ -106,14 +140,24 @@ export function installCharacterProfiles(win, { settings, save, busy, notify }) 
                 // Re-derive the control, rather than trusting a stored selector.
                 const current = read();
                 if (!current || current.api !== value.api || current.source !== value.source) throw new Error('保存的模型类型当前不受支持');
+                if (value.api === 'openai') restoreProxy(value.proxy);
                 if (current.model !== value.model) setControl(current.control, value.model, true);
                 if (read()?.model !== value.model) throw new Error('宿主未接受保存的模型选择');
             }
+            restoreFailed = false;
+            warnLegacy(value, id);
         } catch (error) {
+            restoreFailed = true;
             notify(`角色配置未完整恢复：${error.message}`);
         } finally {
             observedAvatar = avatar(); observed = signature(read()); applying = false; pendingEdit = false;
             if (!value && observedAvatar === id) { observed = undefined; record(); }
+        }
+    }
+    function warnLegacy(value, id) {
+        if (value?.api === 'openai' && !value.proxy && read()?.proxy && !legacyNotices.has(id)) {
+            legacyNotices.add(id);
+            notify('这个角色的旧记录没有代理信息，请重新选择一次正确的代理预设和密码，以后会一起记住。');
         }
     }
     function activate() {
@@ -126,16 +170,17 @@ export function installCharacterProfiles(win, { settings, save, busy, notify }) 
     const changed = event => {
         const id = event.target?.id || '';
         if (id.startsWith('settings_preset_')) waitingPreset = true;
-        if (/^(main_api|chat_completion_source|textgen_type|settings_preset_|model_|custom_model_id|azure_openai_model)/.test(id) || id.endsWith('_model')) {
-            if (!applying) pendingEdit = true;
+        if (/^(main_api|chat_completion_source|textgen_type|settings_preset_|model_|custom_model_id|azure_openai_model|openai_proxy_|openai_reverse_proxy)/.test(id) || id.endsWith('_model')) {
+            if (!applying) { pendingEdit = true; restoreFailed = false; }
             schedule();
         }
         if (!waitingPreset) Promise.resolve().then(record);
     };
     const guardSend = event => {
-        if (!applying) return;
+        if ((!applying && !restoreFailed) || !enabled()) return;
         if (event.type === 'click' ? event.target?.closest?.('#send_but') : event.target?.id === 'send_textarea' && event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault(); event.stopImmediatePropagation(); notify('正在恢复角色的预设与模型，请稍后发送。');
+            event.preventDefault(); event.stopImmediatePropagation();
+            notify(restoreFailed ? '角色配置恢复失败，请重新选择正确的预设、模型和代理后再发送。' : '正在恢复角色的预设、模型与代理，请稍后发送。');
         }
     };
     win.document.addEventListener('click', guardSend, true);
@@ -150,10 +195,15 @@ export function installCharacterProfiles(win, { settings, save, busy, notify }) 
     on(events.SETTINGS_UPDATED, schedule);
     on(events.CHATCOMPLETION_MODEL_CHANGED, schedule);
     on(events.CHAT_CHANGED, activate);
-    on(events.GENERATION_ENDED, activate);
+    on(events.GENERATION_ENDED, () => {
+        // Session/native busy flags are updated by other listeners in the same
+        // event dispatch. Restore only after those listeners have finished.
+        win.clearTimeout(resumeTimer);
+        resumeTimer = win.setTimeout(() => { void activate(); }, 0);
+    });
     on(events.APP_READY, activate);
     return {
         ready: activate(), activate, flush: record,
-        dispose() { record(); stopped = true; win.clearTimeout(timer); cleanups.forEach(fn => fn()); },
+        dispose() { record(); stopped = true; win.clearTimeout(timer); win.clearTimeout(resumeTimer); cleanups.forEach(fn => fn()); },
     };
 }
