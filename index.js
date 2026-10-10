@@ -53,12 +53,14 @@ function getNativeProxySettings(win) {
             script.textContent = `import * as proxy from ${JSON.stringify(new URL('scripts/openai.js', window.location.href).href)}; window.__PT_NATIVE_PROXY__ = proxy; window.dispatchEvent(new window.Event('pt-native-proxy-ready'));`;
             win.document.head.append(script);
         }));
+        // Drop a rejected load so the next attempt can retry.
+        nativeProxyModules.get(win).catch(() => { nativeProxyModules.delete(win); });
     }
     return nativeProxyModules.get(win);
 }
 
 // Child pages show settings too, but only the main page starts the runtime.
-if (window.__PT_CHILD_ID__ || !window.parent.__PT_CHILD_ID__) {
+if (window.__PT_CHILD_ID__ || window === window.top) {
     void initialize().catch(error => {
         console.error('[Parallel Tavern extension]', error);
         const status = document.getElementById('pt-extension-status');

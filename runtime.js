@@ -726,8 +726,9 @@
             dock.append(faces, label);
             launcher.replaceChildren(dock);
         }
+        // 角标显示卡位序号（与面板顺序一致），而不是固定的“1”。
         completionBadge.replaceChildren(...completed.map(session => {
-            const badge = element('span', 'pt-avatar-badge', '1');
+            const badge = element('span', 'pt-avatar-badge', String(all.indexOf(session) + 1));
             badge.dataset.ptSession = session.id;
             return badge;
         }));
@@ -947,7 +948,7 @@
             if (wasBusy && enabled) completionSound();
             if (wasBusy && enabled && activeId !== session.id) session.unreadCompletion = true;
             queueRender();
-            if (wasBusy && enabled && activeId !== session.id) notify(`${session.title} 的生成已结束，可以切回查看。`);
+            if (wasBusy && enabled && activeId !== session.id) notify(`卡${[...sessions.keys()].indexOf(session.id) + 1}「${session.title}」的回复已完成，可以切回查看。`);
         }, session);
         on(c.eventSource, events.GENERATION_STOPPED, () => {
             // Native core can still be saving after STOPPED; isBusy also reads it.
@@ -1008,7 +1009,8 @@
         if (typeof saveChat !== 'function') return notify('宿主没有导出原生保存接口，请在此窗口另存回复或通过宿主重新保存。');
         session.retryingSave = true; render();
         try {
-            await saveChat({});
+            // No arguments: valid for both the old positional and new object signatures.
+            await saveChat();
             if (!disposed && sessions.get(session.id) === session) notify(protection?.writeFailed ? '保存仍未成功，请保留此窗口并另存回复后检查宿主错误。' : '聊天已通过原生接口重新保存。');
         } catch (error) { if (!disposed && sessions.get(session.id) === session) notify(`保存失败：${shortError(error)}`); }
         finally { session.retryingSave = false; if (!disposed && sessions.get(session.id) === session) render(); }

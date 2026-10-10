@@ -29,7 +29,7 @@ function selection(context, doc) {
     return value;
 }
 
-export function installCharacterProfiles(win, { settings, save, busy, notify, nativeProxy, initialSelection }) {
+export function installCharacterProfiles(win, { settings, save, busy = () => false, notify = () => {}, nativeProxy, initialSelection }) {
     const context = () => win.SillyTavern.getContext();
     const avatar = () => { const c = context(); return !c.groupId && c.characters?.[c.characterId]?.avatar || null; };
     const events = context().eventTypes || context().event_types || {};
@@ -39,11 +39,19 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
     let waitingPreset = false, pendingEdit = false, restoreFailed = false, synchronizingProxy = false;
     let presetProxyName = null;
     let userPresetEdit = false;
-    let native, nativeLoaded = !nativeProxy, pendingProxySelection = false, nativeLoadError;
-    const nativeReady = Promise.resolve().then(() => nativeProxy?.()).then(module => {
-        native = module; nativeLoaded = true;
-        if (pendingProxySelection && !stopped) { pendingProxySelection = false; synchronizeProxy(); }
-    }).catch(error => { nativeLoadError = error; });
+    let native, nativeLoaded = !nativeProxy, pendingProxySelection = false, nativeLoadError, nativeReady;
+    // A failed load must not block sending forever: the next activation retries.
+    const loadNative = () => {
+        if (nativeLoaded) return Promise.resolve();
+        if (nativeReady) return nativeReady;
+        nativeLoadError = undefined;
+        nativeReady = Promise.resolve().then(() => nativeProxy?.()).then(module => {
+            native = module; nativeLoaded = true;
+            if (pendingProxySelection && !stopped) { pendingProxySelection = false; synchronizeProxy(); }
+        }).catch(error => { nativeLoadError = error; nativeReady = null; });
+        return nativeReady;
+    };
+    void loadNative();
     const enabled = () => settings.rememberCharacterSettings !== false;
     const read = () => selection(context(), win.document);
     const signature = value => JSON.stringify(value);
@@ -59,8 +67,8 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
         // role record from a transient startup default.
         if (!pendingEdit) return;
         const next = signature(value);
-        if (next === observed && !pendingEdit) return;
         pendingEdit = false;
+        if (next === observed && Object.hasOwn(settings.characterProfiles || {}, id)) return;
         observed = next;
         settings.characterProfiles ||= {};
         const previous = { ...(settings.characterProfiles[id] || {}) };
@@ -146,7 +154,7 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
         const urlNode = doc.getElementById('openai_reverse_proxy');
         if (!passwordId || !urlNode) throw new Error('当前酒馆缺少代理地址或密码控件');
         const preset = doc.getElementById('openai_proxy_preset');
-        native.refresh?.(proxy.preset);
+        native?.refresh?.(proxy.preset);
         if (proxy.preset && (!preset || ![...preset.options].some(o => o.value === proxy.preset))) {
             throw new Error('保存的代理预设已不存在，请重新选择代理');
         }
@@ -237,7 +245,7 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
         queue = queue.then(async () => {
             if (stopped || avatar() !== requestedAvatar) return;
             if (hasProfile()) {
-                await nativeReady;
+                await loadNative();
                 if (stopped || avatar() !== requestedAvatar) return;
                 if (enabled() && nativeLoadError) throw nativeLoadError;
             }
@@ -265,7 +273,7 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
         if (!waitingPreset) Promise.resolve().then(record);
     };
     const guardSend = event => {
-        if (event.type === 'click' ? event.target?.closest?.('#send_but') : event.target?.id === 'send_textarea' && event.key === 'Enter' && !event.shiftKey) {
+        if (event.type === 'click' ? event.target?.closest?.('#send_but') : event.target?.id === 'send_textarea' && event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
             try { prepareSend(); return; } catch {}
             event.preventDefault(); event.stopImmediatePropagation();
             notify(restoreFailed ? '角色配置恢复失败，请重新选择正确的预设、模型和代理后再发送。' : '正在恢复角色的预设、模型与代理，请稍后发送。');
@@ -337,7 +345,7 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
         if (applying || waitingPreset || restorePending()) throw new Error('角色配置尚未准备完成');
         if (restoreFailed) throw new Error('角色配置恢复失败，请重新选择正确设置');
         if (!hasProfile()) return read();
-        if (!nativeLoaded) throw new Error('角色配置尚未准备完成');
+        if (!nativeLoaded) { void loadNative(); throw new Error(nativeLoadError ? `原生代理列表读取失败，正在重试：${nativeLoadError.message}` : '角色配置尚未准备完成'); }
         if (stage === 'request') {
             // The native request body already exists. Never change its context
             // or UI here; synchronization belongs before native generation.

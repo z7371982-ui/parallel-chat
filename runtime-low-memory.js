@@ -112,7 +112,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
     let quietPending = 0;
     let armed = null;             // 下一条生成请求由本扩展接管
     let replayArm = null;         // 切回后等待原生流程发起的那次请求
-    let switching = false, pendingSwitch = null, reattachBusy = false, reattachTimer = null;
+    let switching = false, pendingSwitch = null, deferredSwitch = null, reattachBusy = false, reattachTimer = null;
     let profile = null;
     // 并行开关：关闭时本扩展不接管任何请求、不建会话、不动草稿和滚动，就是普通聊天。
     const isOn = () => settings.parallelEnabled === true;
@@ -223,9 +223,36 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         session.name = info.name || session.name; session.touched = Date.now();
         return session;
     }
+    // 通知里统一使用卡位序号，与面板顺序一致。
+    function cardLabel(key, name) {
+        const index = [...sessions.keys()].indexOf(key);
+        return `${index >= 0 ? `卡${index + 1}` : ''}「${name || sessions.get(key)?.name || '角色'}」`;
+    }
+    // 同一角色在原卡里“开始新聊天”时，原地改写卡的 key，保持卡位不变。
+    function rekeySession(oldKey, info) {
+        const old = sessions.get(oldKey);
+        if (!old || old.job || old.avatar !== info.avatar || sessions.has(info.key)) return false;
+        // 旧聊天还有保存链或保存失败记录时不改写，避免跳过等待和重试。
+        if (nativeSaveChains.has(oldKey) || nativeSaveFailures.has(oldKey)) return false;
+        // 只有刚开的新聊天才原地替换；从历史打开的旧聊天仍新建一张卡。
+        let length = Infinity; try { length = ctx().chat?.length ?? Infinity; } catch { /* ignore */ }
+        if (length > 1) return false;
+        drafts.delete(oldKey); readings.delete(oldKey);
+        const rebuilt = new Map();
+        for (const [key, value] of sessions) {
+            if (key === oldKey) { value.key = info.key; value.chatId = info.chatId; value.unread = false; rebuilt.set(info.key, value); }
+            else rebuilt.set(key, value);
+        }
+        sessions.clear();
+        for (const [key, value] of rebuilt) sessions.set(key, value);
+        log('session:rekey', { s: sid(info.key) });
+        return true;
+    }
     function syncCurrent() {
         const info = current();
+        const previousKey = curKey;
         curKey = info.key;
+        if (info.key && previousKey && previousKey !== info.key && !switching && isOn()) rekeySession(previousKey, info);
         // 切换途中酒馆可能先短暂打开该角色的另一份聊天，那不是用户要的会话，不建卡。
         if (info.key && !switching && isOn()) ensureSession(info);
     }
@@ -253,6 +280,8 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             if (first) job.previewFormat = /^[[{"]/.test(first) ? 'json' : 'stream';
         }
         if (job.previewFormat === 'json' || (!job.sig?.stream && !/event-stream/i.test(job.head?.type || ''))) {
+            // 非流式回复在收完前是半截 JSON，解析不出内容；收完再整体解析一次，避免每秒全量重解码。
+            if (job.status === 'running') return job.parsed || { text: '', reasoning: '' };
             if (job.parsedAt !== job.bytes || !job.parsed) { job.parsed = parseBody(bodyText(job)); job.parsedAt = job.bytes; }
             return job.parsed;
         }
@@ -265,11 +294,13 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         };
         while (state.index < job.chunks.length) {
             state.pending += state.decoder.decode(job.chunks[state.index++], { stream: true });
-            let end;
-            while ((end = state.pending.indexOf('\n')) >= 0) {
-                consume(state.pending.slice(0, end).replace(/\r$/, ''));
-                state.pending = state.pending.slice(end + 1);
+            // 按偏移扫描，最后只切一次，避免大块数据时反复复制字符串造成卡顿。
+            let start = 0, end;
+            while ((end = state.pending.indexOf('\n', start)) >= 0) {
+                consume(state.pending.slice(start, end).replace(/\r$/, ''));
+                start = end + 1;
             }
+            if (start) state.pending = state.pending.slice(start);
         }
         if (job.status !== 'running' && !state.flushed) {
             state.pending += state.decoder.decode(); consume(state.pending); state.pending = ''; state.flushed = true;
@@ -373,7 +404,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         pumpBgWrites();
         if (switching) return;
         completionSound();
-        notify(jobError(job) ? `${job.name} 的后台生成失败，切回可查看原因。` : `${job.name} 的回复已完成，可以切回查看。`);
+        notify(jobError(job) ? `${cardLabel(job.key, job.name)} 的后台生成失败，切回可查看原因。` : `${cardLabel(job.key, job.name)} 的回复已完成，可以切回查看。`);
     }
     function pump(job, request) {
         request.then(async response => {
@@ -646,7 +677,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
     }
     const generationOver = () => { later(() => { settle(); queueRender(); }, 150); };
     on(events.GENERATION_ENDED, () => {
-        building = null; log('gen:ended'); generationOver();
+        building = null; log('gen:ended'); generationOver(); runDeferredSwitch();
         const finished = gen;
         if (!finished || finished.ended) return;
         finished.ended = true;
@@ -655,7 +686,16 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             if (finished.info.key && finished.info.key === curKey) { fgFinishedKey = curKey; queueRender(); }
         }, 300);
     });
-    on(events.GENERATION_STOPPED, () => { building = null; lastStoppedAt = Date.now(); fgFinishedKey = null; log('gen:stopped'); generationOver(); });
+    on(events.GENERATION_STOPPED, () => { building = null; lastStoppedAt = Date.now(); fgFinishedKey = null; log('gen:stopped'); generationOver(); runDeferredSwitch(); });
+    function runDeferredSwitch() {
+        if (!deferredSwitch || disposed) return;
+        const { target, fromKey } = deferredSwitch; deferredSwitch = null;
+        // 用户在此期间已换到别的聊天，就不再自动切走。
+        if (curKey !== fromKey) return;
+        // 等酒馆收尾（保存、流处理器释放）后再切。
+        void waitFor(() => disposed || (!isGenerating() && !nativeStream() && nativeSaving?.() !== true), 15000)
+            .then(ok => { if (ok && !disposed) void openSession(target); else if (!disposed) notify('生成收尾超时，请再点一次要打开的角色。'); });
+    }
     on(events.CHAT_CHANGED, () => { chatSeenAt = Date.now(); fgFinishedKey = null; gen = null; armed = null; building = null; syncCurrent(); log('chat:changed', { s: sid(curKey) }); if (isOn()) restoreReading(curKey);
         const waiting = sessions.get(curKey)?.job;
         if (waiting?.bgWritten && Number.isInteger(waiting.bgIndex)) hidePending(waiting.bgIndex); else showPending();
@@ -846,7 +886,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
                 const failed = jobError(job);
                 if (failed) {
                     log('reattach:regen-failed-keep-old', { s: sid(job.key) });
-                    notify(`「${job.name}」的重新生成失败了（${failed}），原来的回复保留着。`);
+                    notify(`${cardLabel(job.key, job.name)}的重新生成失败了（${failed}），原来的回复保留着。`);
                     drop(job); render(); return;
                 }
                 if (typeof c.deleteLastMessage === 'function') {
@@ -859,7 +899,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             log('reattach', { s: sid(job.key), type: job.type, mode, created: job.created, marked, len: chat.length, base: job.baseLength, status: job.status });
             if (!mode) {
                 job.mismatch = true; session.unread = true;
-                notify(`「${job.name}」的聊天内容已有变化，后台回复没有自动写入。可在并行面板里点“…”直接写入原消息、复制或丢弃。`);
+                notify(`${cardLabel(job.key, job.name)}的聊天内容已有变化，后台回复没有自动写入。可在并行面板里点“…”直接写入原消息、复制或丢弃。`);
                 render(); return;
             }
             session.unread = false;
@@ -1124,7 +1164,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             } else if (touched && current().key === key && c.chat[index] === message) {
                 Object.assign(message.extra ||= {}, meta);
             }
-            notify(`${job ? '「' + job.name + '」的' : '这条'}回复数据已保留，但收尾或保存尚未完成，可重试：${shortError(error)}`);
+            notify(`${job ? cardLabel(job.key, job.name) + '的' : '这条'}回复数据已保留，但收尾或保存尚未完成，可重试：${shortError(error)}`);
         }
     }
     function replayFailed(job, session, reason) {
@@ -1138,7 +1178,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         job.retries = (job.retries || 0) + 1;
         if (job.retries >= 2 || job.type === 'swipe' || job.type === 'continue') {
             job.mismatch = true; session.unread = true;
-            notify(`「${job.name}」的后台回复没能自动写入。可在并行面板里点“…”直接写入原消息、复制或丢弃。`);
+            notify(`${cardLabel(job.key, job.name)}的后台回复没能自动写入。可在并行面板里点“…”直接写入原消息、复制或丢弃。`);
         } else scheduleReattach(1500);
         render();
     }
@@ -1164,6 +1204,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             // One native chat switch at a time, including slow save/replay.
             pendingSwitch = target; log('switch:queued'); return;
         }
+        deferredSwitch = null;
         let originKey = null, draftNode = null, priorReadOnly = false;
         switching = true; switchingSince = Date.now(); updateHandoff();
         const known = target.chatId ? target.avatar + '\n' + target.chatId : [...sessions.keys()].find(key => key.startsWith(target.avatar + '\n'));
@@ -1200,7 +1241,8 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
                 log('switch:wait-send');
                 await waitFor(() => isGenerating(), 1500, 30);
             }
-            if (isGenerating() && !foregroundJob() && building && building.key === curKey && sessions.has(curKey) && !sessions.get(curKey).job) {
+            // 当前对话还不是会话卡但有空位时，请求发出时会自动补卡，同样可以等它转入后台。
+            if (isGenerating() && !foregroundJob() && building && building.key === curKey && (sessions.has(curKey) ? !sessions.get(curKey).job : sessions.size < MAX_SESSIONS)) {
                 // 请求还没发出：等它发出再转入后台，而不是硬切（酒馆会拒绝）。
                 log('switch:wait-request', genState());
                 notify('这条消息的请求还没发出，发出后会自动转入后台并切换，请稍等…');
@@ -1209,6 +1251,15 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             }
             if (isGenerating() || foregroundJob()?.pendingDetach) {
                 const job = foregroundJob();
+                if (!job && !ctx().groupId) {
+                    // 这次生成转不进后台（卡满、该卡已有未处理回复或不支持的接口）：
+                    // 先记下目标，等生成结束后自动切过去，而不是直接拒绝。
+                    log('switch:deferred', genState()); deferredSwitch = { target, fromKey: curKey };
+                    const why = sessions.get(curKey)?.job ? '这张卡还有一条未处理的后台回复' : curKey && !sessions.has(curKey) ? `当前对话不在 ${MAX_SESSIONS} 个会话里` : '这次生成不支持转入后台';
+                    notify(`${why}，已记下要打开的角色，当前回复结束后会自动切换。`);
+                    panelOpen = false; pickerOpen = false; render();
+                    return;
+                }
                 if (!job) { log('switch:blocked-untracked', genState()); notify(sessions.get(curKey)?.job ? '这个对话还有一条没处理的后台回复（在面板里复制或丢弃它），所以这次新的生成不能转入后台。请等待完成或先停止。' : curKey && !sessions.has(curKey) ? `当前对话不在 ${MAX_SESSIONS} 个并行会话里，这次生成不能转入后台。请等待完成或先停止。` : '当前这次生成无法转入后台（群聊、扩展自己的请求或不支持的接口）。请等待完成或先停止。'); return; }
                 if (!(await detach(job))) { log('switch:detach-refused'); return; }
             }
@@ -1790,10 +1841,12 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             dock.append(faces, label);
             launcher.replaceChildren(dock);
         }
-        const nextBadge = JSON.stringify(completed.map(s => s.key));
+        // 角标显示卡片在面板里的固定序号，与通知里的“卡 N”一致。
+        const order = [...sessions.keys()];
+        const nextBadge = JSON.stringify(completed.map(s => [s.key, order.indexOf(s.key)]));
         if (nextBadge !== badgeSignature) {
             badgeSignature = nextBadge;
-            completionBadge.replaceChildren(...completed.map(s => { const badge = element('span', 'pt-avatar-badge', '1'); badge.dataset.ptSession = s.key; return badge; }));
+            completionBadge.replaceChildren(...completed.map(s => { const badge = element('span', 'pt-avatar-badge', String(order.indexOf(s.key) + 1)); badge.dataset.ptSession = s.key; return badge; }));
         }
         show(completionBadge, completed.length > 0 && !launcherSide); positionCompletionBadge();
         const label = launcherSide ? `并行对话：${running ? `${running} 个会话正在生成` : finished ? '生成已完成' : '暂无生成'}；点击或向内滑动展开`
