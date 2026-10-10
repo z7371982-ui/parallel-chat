@@ -32,27 +32,32 @@ function selection(context, doc) {
 export function installCharacterProfiles(win, { settings, save, busy, notify, nativeProxy, initialSelection }) {
     const context = () => win.SillyTavern.getContext();
     const avatar = () => { const c = context(); return !c.groupId && c.characters?.[c.characterId]?.avatar || null; };
-    const initialAvatar = avatar();
     const events = context().eventTypes || context().event_types || {};
     const emitter = context().eventSource;
     const cleanups = [];
     let stopped = false, applying = false, timer, resumeTimer, observed, observedAvatar, queue = Promise.resolve();
     let waitingPreset = false, pendingEdit = false, restoreFailed = false, synchronizingProxy = false;
     let presetProxyName = null;
-    let native, nativeLoaded = !nativeProxy, pendingProxySelection = false;
+    let userPresetEdit = false;
+    let native, nativeLoaded = !nativeProxy, pendingProxySelection = false, nativeLoadError;
     const nativeReady = Promise.resolve().then(() => nativeProxy?.()).then(module => {
         native = module; nativeLoaded = true;
         if (pendingProxySelection && !stopped) { pendingProxySelection = false; synchronizeProxy(); }
-    });
+    }).catch(error => { nativeLoadError = error; });
     const enabled = () => settings.rememberCharacterSettings !== false;
     const read = () => selection(context(), win.document);
     const signature = value => JSON.stringify(value);
     const usesProxy = () => context().mainApi === 'openai' && proxySources.has(context().chatCompletionSettings?.chat_completion_source);
+    const hasProfile = () => enabled() && Object.hasOwn(settings.characterProfiles || {}, avatar());
+    const restorePending = () => hasProfile() && observedAvatar !== avatar();
     const record = () => {
         if (stopped || applying || waitingPreset || !nativeLoaded || restoreFailed || synchronizingProxy) return;
         const id = avatar(), value = read();
         if (!enabled()) { observedAvatar = id; observed = signature(value); pendingEdit = false; return; }
         if (!id || !value || id !== observedAvatar) return;
+        // Native settings loading/SETTINGS_UPDATED must never manufacture a
+        // role record from a transient startup default.
+        if (!pendingEdit) return;
         const next = signature(value);
         if (next === observed && !pendingEdit) return;
         pendingEdit = false;
@@ -116,7 +121,7 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
         if (apiSettings.reverse_proxy !== proxy.url || apiSettings.proxy_password !== proxy.password) throw new Error('宿主未接受保存的代理配置');
     }
     function synchronizeProxy(name = win.document.getElementById('openai_proxy_preset')?.value) {
-        if (stopped || applying || synchronizingProxy) return;
+        if (stopped || !enabled() || applying || synchronizingProxy) return;
         if (!nativeLoaded) { pendingProxySelection = true; return; }
         if (!usesProxy()) return;
         synchronizingProxy = true;
@@ -127,6 +132,7 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
             // Empty passwords are intentional and must clear the previous key.
             restoreFailed = false;
         } catch (error) {
+            if (stopped || !enabled()) return;
             restoreFailed = true;
             clearProxy();
             notify(`代理预设未完整切换：${error.message}`);
@@ -150,11 +156,20 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
         if (proxy.preset && preset.value !== proxy.preset) throw new Error('宿主未接受保存的代理配置');
     }
     async function restore() {
-        if (stopped || !enabled() || busy()) return;
+        if (stopped) return;
         const id = avatar();
         if (!id) { observedAvatar = null; return; }
-        const hasSaved = Object.hasOwn(settings.characterProfiles || {}, id);
-        let value = hasSaved ? settings.characterProfiles[id] : (id === initialAvatar ? initialSelection : null);
+        const hasSaved = enabled() && Object.hasOwn(settings.characterProfiles || {}, id);
+        if (!hasSaved) {
+            // No role record means use this document's current native settings.
+            // Do not inherit another role's snapshot, change fields, or save.
+            initialSelection = null;
+            observedAvatar = id; observed = signature(read()); pendingEdit = false;
+            restoreFailed = false;
+            return;
+        }
+        if (busy()) return;
+        const value = settings.characterProfiles[id];
         // Old snapshots contribute their name only; no credentials are copied.
         let completed = false;
         applying = true;
@@ -180,7 +195,7 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
                         catch (error) { win.clearTimeout(timeout); remove(); reject(error); }
                     });
                 }
-                if (stopped || avatar() !== id || busy()) return;
+                if (stopped || !enabled() || avatar() !== id || busy()) return;
                 const apiSettings = value.api === 'openai' ? context().chatCompletionSettings : context().textCompletionSettings;
                 if (apiSettings[value.api === 'openai' ? 'chat_completion_source' : 'type'] !== value.source) {
                     setControl(value.api === 'openai' ? 'chat_completion_source' : 'textgen_type', value.source);
@@ -196,43 +211,62 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
                 }
                 if (current.model !== value.model) setControl((value.api === 'openai' ? (chatControls[value.source] || [null, `model_${value.source}_select`])[1] : textControls[value.source] || `${value.source}_model`), value.model, true);
                 if (read()?.model !== value.model) throw new Error('宿主未接受保存的模型选择');
-            } else if (context().mainApi === 'openai') {
-                restoreProxy(resolveProxy(read()?.proxy));
             }
             restoreFailed = false;
             completed = true;
 
         } catch (error) {
+            if (stopped || !enabled() || avatar() !== id) return;
             restoreFailed = true;
             clearProxy();
             notify(`角色配置未完整恢复：${error.message}`);
         } finally {
-            observedAvatar = avatar(); observed = signature(read()); applying = false; pendingEdit = false;
-            if (completed && !restoreFailed && observedAvatar === id) { initialSelection = null; observed = undefined; record(); }
+            applying = false; waitingPreset = false; pendingEdit = false;
+            // A stale restore must not mark the next role as already restored.
+            if (!stopped && avatar() === id) {
+                observedAvatar = id; observed = signature(read());
+                if (completed && enabled() && !restoreFailed) { initialSelection = null; pendingEdit = true; record(); }
+            }
         }
     }
     function activate() {
         // Only actual local changes update the shared profile. Viewing an older
         // window must not overwrite a newer selection made in another window.
         record();
-        queue = queue.then(() => nativeReady).then(restore).catch(error => { restoreFailed = true; clearProxy(); notify(`角色配置恢复失败：${error.message}`); });
+        const requestedAvatar = avatar();
+        queue = queue.then(async () => {
+            if (stopped || avatar() !== requestedAvatar) return;
+            if (hasProfile()) {
+                await nativeReady;
+                if (stopped || avatar() !== requestedAvatar) return;
+                if (enabled() && nativeLoadError) throw nativeLoadError;
+            }
+            return restore();
+        }).catch(error => {
+            if (stopped || avatar() !== requestedAvatar) return;
+            if (!hasProfile()) { restoreFailed = false; observedAvatar = avatar(); observed = signature(read()); return; }
+            restoreFailed = true; clearProxy(); notify(`角色配置恢复失败：${error.message}`);
+        });
         return queue;
     }
     const changed = (event, data) => {
         const id = event.target?.id || '';
+        if (!enabled()) { waitingPreset = false; pendingEdit = false; return; }
         if (synchronizingProxy) return;
-        if (id === 'openai_proxy_preset' && !applying) synchronizeProxy();
-        if (id.startsWith('settings_preset_')) waitingPreset = true;
+        const explicitEdit = event.isTrusted || event.originalEvent?.isTrusted || data?.source === 'user';
+        if (id.startsWith('settings_preset_') && explicitEdit) userPresetEdit = true;
+        if (id === 'openai_proxy_preset' && !applying && (hasProfile() || explicitEdit)) synchronizeProxy();
+        // Only actual BEFORE/AFTER lifecycle events own waitingPreset. A
+        // delegated DOM change can arrive after AFTER and must not re-arm it.
         if (/^(main_api|chat_completion_source|textgen_type|settings_preset_|model_|custom_model_id|azure_openai_model|openai_proxy_|openai_reverse_proxy)/.test(id) || id.endsWith('_model')) {
-            if (!applying) pendingEdit = true;
+            if (!applying && explicitEdit) pendingEdit = true;
             schedule();
         }
         if (!waitingPreset) Promise.resolve().then(record);
     };
     const guardSend = event => {
         if (event.type === 'click' ? event.target?.closest?.('#send_but') : event.target?.id === 'send_textarea' && event.key === 'Enter' && !event.shiftKey) {
-            if (!applying && !waitingPreset && !restoreFailed) synchronizeProxy();
-            if (!applying && !waitingPreset && !restoreFailed) return;
+            try { prepareSend(); return; } catch {}
             event.preventDefault(); event.stopImmediatePropagation();
             notify(restoreFailed ? '角色配置恢复失败，请重新选择正确的预设、模型和代理后再发送。' : '正在恢复角色的预设、模型与代理，请稍后发送。');
         }
@@ -251,10 +285,11 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
         cleanups.push(() => { win.document.removeEventListener('input', changed); win.document.removeEventListener('change', changed); });
     }
     const proxyButton = event => {
+        if (!enabled()) return;
         if (event.target?.closest?.('#save_proxy, #delete_proxy')) {
             // The native buttons update fields with .val(), without input/change.
             Promise.resolve().then(() => {
-                if (!stopped && !applying) {
+                if (!stopped && enabled() && !applying) {
                     synchronizeProxy();
                     pendingEdit = true; record(); schedule();
                 }
@@ -269,12 +304,20 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
         cleanups.push(() => win.document.removeEventListener('click', proxyButton));
     }
     on(events.OAI_PRESET_CHANGED_BEFORE, () => {
+        if (!enabled()) return;
         waitingPreset = true;
-        if (!applying) { pendingEdit = true; presetProxyName = win.document.getElementById('openai_proxy_preset')?.value || null; }
+        if (!applying) { presetProxyName = win.document.getElementById('openai_proxy_preset')?.value || null; }
     });
     on(events.OAI_PRESET_CHANGED_AFTER, () => {
         waitingPreset = false;
-        if (!applying) synchronizeProxy(presetProxyName || read()?.proxy?.preset);
+        if (!enabled()) { presetProxyName = null; userPresetEdit = false; return; }
+        const name = presetProxyName || read()?.proxy?.preset;
+        if (!applying && (hasProfile() || userPresetEdit)) { synchronizeProxy(name); userPresetEdit = false; }
+        else if (!applying) {
+            // A synchronous native AFTER may precede the trusted DOM change.
+            Promise.resolve().then(() => { if (!stopped && enabled() && !applying && userPresetEdit) synchronizeProxy(name); userPresetEdit = false; });
+        }
+        if (hasProfile()) userPresetEdit = false;
         presetProxyName = null;
         schedule();
     });
@@ -289,18 +332,38 @@ export function installCharacterProfiles(win, { settings, save, busy, notify, na
         resumeTimer = win.setTimeout(() => { void activate(); }, 0);
     });
     on(events.APP_READY, activate);
+    function prepareSend({ stage = 'ui' } = {}) {
+        if (!enabled()) return read();
+        if (applying || waitingPreset || restorePending()) throw new Error('角色配置尚未准备完成');
+        if (restoreFailed) throw new Error('角色配置恢复失败，请重新选择正确设置');
+        if (!hasProfile()) return read();
+        if (!nativeLoaded) throw new Error('角色配置尚未准备完成');
+        if (stage === 'request') {
+            // The native request body already exists. Never change its context
+            // or UI here; synchronization belongs before native generation.
+            resolveProxy(read()?.proxy);
+        } else synchronizeProxy();
+        if (restoreFailed) throw new Error('代理预设不可用，请重新选择酒馆已保存的预设');
+        return read();
+    }
     return {
         ready: activate(), activate, flush: record,
-        prepareSend() {
-            if (!nativeLoaded || applying || waitingPreset) throw new Error('角色配置尚未准备完成');
-            if (restoreFailed) throw new Error('代理预设不可用，请重新选择酒馆已保存的预设');
-            synchronizeProxy();
-            if (restoreFailed) throw new Error('代理预设不可用，请重新选择酒馆已保存的预设');
-            return read();
+        prepareSend,
+        adoptCurrent() {
+            if (stopped || !enabled()) throw new Error('请先开启按角色记住设置');
+            if (applying || waitingPreset || busy()) throw new Error('请等待设置加载、生成和保存结束');
+            const id = avatar(), value = read();
+            if (!id || !value) throw new Error('当前没有可记录的单角色预设和模型');
+            if (!nativeLoaded) throw new Error('原生配置列表尚未连接，请稍后再试');
+            if (usesProxy()) resolveProxy(value.proxy);
+            // This explicit user action stores references only, never credentials.
+            observedAvatar = id; observed = undefined; pendingEdit = true; restoreFailed = false;
+            record();
+            return value;
         },
-        get blocked() { return applying || waitingPreset || restoreFailed || !nativeLoaded; },
+        get blocked() { return enabled() && (applying || waitingPreset || restoreFailed || restorePending() || hasProfile() && !nativeLoaded); },
         capture() {
-            if (!nativeLoaded || applying || waitingPreset || synchronizingProxy || restoreFailed) throw new Error('当前预设正在切换或尚未恢复，请稍后再打开角色');
+            if (enabled() && (hasProfile() && !nativeLoaded || applying || waitingPreset || synchronizingProxy || restoreFailed)) throw new Error('当前预设正在切换或尚未恢复，请稍后再打开角色');
             const value = read();
             return value ? { ...value, ...(value.proxy ? { proxy: { ...value.proxy } } : {}) } : null;
         },

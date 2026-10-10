@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.7.0-unified-r2 — Tavern Helper global script.
+/* Parallel Tavern 0.7.0-unified-r3 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.7.0-unified-r2 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.7.0-unified-r3 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,7 +110,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.7.0-unified-r2';
+    const VERSION = '0.7.0-unified-r3';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let previousPageStage = null;
     let currentPageStage = null;

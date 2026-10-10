@@ -8,7 +8,8 @@ import * as nativeOpenAI from '../../../openai.js';
 const KEY = 'parallel_tavern';
 const CONTROLLER = '__PARALLEL_TAVERN_V2__';
 const nativeProxyModules = new WeakMap();
-const VERSION = '0.7.0-unified-r2';
+const profileInstances = new WeakMap();
+const VERSION = '0.7.0-unified-r3';
 
 function chooseRuntimeMode(settings) {
     if (['multi-window', 'low-memory'].includes(settings.runtimeMode)) return settings.runtimeMode;
@@ -83,7 +84,11 @@ async function initialize() {
     window.__PT_SETTINGS_BRIDGE__ = { settings, persist };
     window.__PT_EXTENSION_CONFIG__ = settings;
     window.__PT_INSTALL_SCROLL_QR_COMPAT__ = installScrollQrCompatibility;
-    window.__PT_INSTALL_CHARACTER_PROFILES__ = (win, options) => installCharacterProfiles(win, { ...options, settings, save: saveSettingsDebounced, nativeProxy: () => getNativeProxySettings(win) });
+    window.__PT_INSTALL_CHARACTER_PROFILES__ = (win, options) => {
+        const profile = installCharacterProfiles(win, { ...options, settings, save: saveSettingsDebounced, nativeProxy: () => getNativeProxySettings(win) });
+        profileInstances.set(win, profile);
+        return profile;
+    };
     }
 
     const root = document.createElement('div');
@@ -111,6 +116,8 @@ async function initialize() {
                 <label class="checkbox_label" for="pt-extension-night"><input id="pt-extension-night" type="checkbox"><span>夜间模式</span></label>
                 <label class="checkbox_label" for="pt-extension-character-settings"><input id="pt-extension-character-settings" type="checkbox"><span>按角色记住预设、模型与代理</span></label>
                 <small>只记住角色的预设、代理预设名称和模型；代理网站与密钥始终读取当前酒馆原生预设。请在主页面保存代理配置。同一角色的不同聊天共用选择，正在生成或保存时不更换。</small>
+                <button type="button" class="menu_button" id="pt-extension-adopt-profile">以当前选择更新本角色</button>
+                <small>无角色记录时保留现场设置。此按钮只在你明确点击后记录当前窗口的预设、模型和代理名称，可修正旧记录。</small>
                 <div><button type="button" class="menu_button" id="pt-extension-open">打开并行面板</button></div>
                 <small id="pt-extension-status" role="status"></small>
             </div>
@@ -120,6 +127,15 @@ async function initialize() {
     container.append(root);
     const checkbox = root.querySelector('#pt-extension-show-launcher');
     const status = root.querySelector('[role="status"]');
+    root.querySelector('#pt-extension-adopt-profile').addEventListener('click', () => {
+        const active = owner[CONTROLLER]?.getActiveWindow?.() || owner;
+        try {
+            const profile = profileInstances.get(active);
+            if (!profile) throw new Error('当前窗口的角色设置尚未连接，请稍后再试');
+            profile.adoptCurrent();
+            status.textContent = '当前角色的选择已更新；只保存预设、模型和代理名称。';
+        } catch (error) { status.textContent = String(error.message || '角色选择未保存'); }
+    });
     const mode = root.querySelector('#pt-extension-mode');
     mode.value = settings.runtimeMode;
     mode.disabled = child;

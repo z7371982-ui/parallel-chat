@@ -1,11 +1,11 @@
-/* 并行对话 0.7.0-unified-r2 — 低内存单页面后台生成（基于 0.6.8-r7）。
+/* 并行对话 0.7.0-unified-r3 — 低内存单页面后台生成（基于 0.6.8-r7）。
  *
  * 不再为每个会话启动第二个酒馆页面（iframe）。切换对话时，只把正在进行的
  * 生成请求留在后台继续接收；切回该对话后，由酒馆原生流程把保存下来的响应
  * 重新走一遍（正则、变量脚本、保存都是原生逻辑）。不自行拼接提示词，不直接
  * 写聊天文件，不保存 API 密钥。
  */
-const VERSION = '0.7.0-unified-r2';
+const VERSION = '0.7.0-unified-r3';
 const KEY = '__PARALLEL_TAVERN_V2__';
 const MAX_SESSIONS = 3;
 const STORE = 'parallel-tavern.jobs.v1';
@@ -444,7 +444,9 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         log(arm.replay ? 'fetch:replay' : 'fetch:track', { src: sig.src, stream: sig.stream, builtMs: building ? Date.now() - building.since : null });
         building = null;
         if (arm.replay) return replay(arm.replay, sig, signal);
-        try { profile?.prepareSend?.(); } catch (error) { building = null; throw error; }
+        // The host has already built this request. Validate ownership/readiness
+        // without changing the settings used to construct its body.
+        try { profile?.prepareSend?.({ stage: 'request' }); } catch (error) { building = null; throw error; }
         for (const old of [...jobs.values()]) if (old.attached && old.status !== 'running') drop(old);
         const info = arm.gen.info;
         if (current().key !== info.key) throw new Error('生成请求所属聊天已改变，已阻止发送');
