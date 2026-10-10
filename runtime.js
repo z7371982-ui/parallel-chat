@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.5.6-r1-proxyfix2 — Tavern Helper global script.
+/* Parallel Tavern 0.7.0-unified-r2 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.5.6-r1-proxyfix2 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.7.0-unified-r2 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,7 +110,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.5.6-r1-proxyfix2';
+    const VERSION = '0.7.0-unified-r2';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let previousPageStage = null;
     let currentPageStage = null;
@@ -604,11 +604,13 @@
         try { return !!(session.busy || session.win.__PT_CORE__?.is_send_press === true); }
         catch { return !!session.busy; }
     }
+    const saveProtection = session => session.writeProtection || session.win?.__PT_BOOT_TRACE__?.chatProtection;
     function isSaving(session) {
-        try { return session.win.__PT_CORE__?.isChatSaving === true; }
+        try { return session.win.__PT_CORE__?.isChatSaving === true || saveProtection(session)?.pendingWrites > 0 || saveProtection(session)?.writeFailed === true; }
         catch { return false; }
     }
     function activityLabel(session) {
+        if (saveProtection(session)?.writeFailed) return '待保存或保存失败 · 回复仍在此窗口';
         return isGenerating(session) ? '正在回复…' : isSaving(session) ? '正在保存…' : session.status;
     }
     function isBusy(session) {
@@ -803,6 +805,10 @@
             if (controlsId === session.id) {
                 const controls = element('div', 'pt-actions');
                 if (isGenerating(session)) controls.append(button('停止生成', () => stopSession(session)));
+                if (saveProtection(session)?.writeFailed) {
+                    const retry = button('重试原生保存', () => void retrySessionSave(session));
+                    retry.disabled = !!session.retryingSave; controls.append(retry);
+                }
                 if (session.id !== 'main') {
                     const close = button('关闭窗口', () => closeSession(session));
                     close.disabled = isBusy(session); controls.append(close);
@@ -914,10 +920,11 @@
     }
     function on(emitter, name, fn, session) {
         if (!name || !emitter?.on) return;
-        emitter.on(name, fn);
+        const live = (...args) => { if (!disposed && sessions.get(session.id) === session) return fn(...args); };
+        emitter.on(name, live);
         session.cleanups.push(() => {
-            if (emitter.removeListener) emitter.removeListener(name, fn);
-            else emitter.off?.(name, fn);
+            if (emitter.removeListener) emitter.removeListener(name, live);
+            else emitter.off?.(name, live);
         });
     }
     function attachSession(session) {
@@ -931,6 +938,7 @@
         if (w !== host) session.cleanups.push(bindAudioGesture(w));
         on(c.eventSource, events.GENERATION_STARTED, (_type, _options, dryRun) => {
             if (dryRun) return;
+            session.generationSeen = true;
             session.unreadCompletion = false;
             session.busy = true; session.status = '生成中'; session.error = null; queueRender();
         }, session);
@@ -945,9 +953,26 @@
             // Native core can still be saving after STOPPED; isBusy also reads it.
             session.busy = false; session.status = '已停止'; queueRender();
         }, session);
+        on(c.eventSource, events.MESSAGE_RECEIVED, index => {
+            const message = ctx(w).chat?.[index];
+            if (session.generationSeen && message && message.is_user === false && !message.is_system) {
+                session.generationSeen = false;
+                w.__PT_MARK_CHAT_DIRTY__?.(); queueRender();
+            }
+        }, session);
         on(c.eventSource, events.CHAT_CHANGED, () => { identity(session); queueRender(); }, session);
         const capture = e => {
             if (!enabled || !session.ready) return;
+            const history = e.target?.closest?.('.select_chat_block[file_name]');
+            if (history) {
+                identity(session);
+                const chat = history.getAttribute('file_name')?.replace(/\.jsonl$/i, '');
+                if (!chat || !session.avatar) return;
+                e.preventDefault(); e.stopImmediatePropagation();
+                // Different histories keep separate native documents and drafts.
+                void openCharacter(session.avatar, chat);
+                return;
+            }
             const target = e.target?.closest?.('.character_select[data-chid]');
             if (target) {
                 const char = ctx(w).characters[Number(target.dataset.chid)];
@@ -970,11 +995,27 @@
         session.cleanups.push(() => core.remove());
     }
     async function stopSession(session) {
-        try { await ctx(session.win).stopGeneration(); session.status = '正在停止'; queueRender(); }
+        if (disposed || sessions.get(session.id) !== session) return;
+        session.status = '正在停止'; queueRender();
+        try { await ctx(session.win).stopGeneration(); if (!disposed && sessions.get(session.id) === session) { session.status = isGenerating(session) ? '正在停止' : '已停止'; queueRender(); } }
         catch (error) { notify(`停止失败：${shortError(error)}`); }
+    }
+    async function retrySessionSave(session) {
+        if (disposed || sessions.get(session.id) !== session || session.retryingSave || isGenerating(session)) return;
+        const protection = saveProtection(session);
+        if (protection?.pendingWrites || session.win?.__PT_CORE__?.isChatSaving === true) return notify('保存仍在进行，请稍后重试。');
+        const saveChat = session.win?.__PT_CORE__?.saveChat;
+        if (typeof saveChat !== 'function') return notify('宿主没有导出原生保存接口，请在此窗口另存回复或通过宿主重新保存。');
+        session.retryingSave = true; render();
+        try {
+            await saveChat({});
+            if (!disposed && sessions.get(session.id) === session) notify(protection?.writeFailed ? '保存仍未成功，请保留此窗口并另存回复后检查宿主错误。' : '聊天已通过原生接口重新保存。');
+        } catch (error) { if (!disposed && sessions.get(session.id) === session) notify(`保存失败：${shortError(error)}`); }
+        finally { session.retryingSave = false; if (!disposed && sessions.get(session.id) === session) render(); }
     }
     function closeSession(session) {
         if (session.id === 'main') return;
+        if (saveProtection(session)?.writeFailed) return notify('此窗口的聊天尚未成功保存，回复仍保留在窗口中。请重试原生保存或另存回复，保存成功后再关闭。');
         if (isBusy(session)) return notify('请先停止或等待这个角色生成、保存结束。');
         identity(session);
         if (session.ready) {
@@ -1013,9 +1054,34 @@
         const parentHost = window.parent;
         window.__PT_CHILD_ID__ = id;
         const trace = window.__PT_BOOT_TRACE__ = { requests: [], resourceErrors: {} };
-        trace.chatProtection = { existingHistory: !!protectExisting, blockedWrites: 0, verified: false };
+        trace.chatProtection = { existingHistory: !!protectExisting, blockedWrites: 0, verified: false, pendingWrites: 0, writeFailed: false };
+        const failedWrites = new Set();
+        const writeVersions = new Map();
+        let nativeCommitVersion;
+        const currentChatKey = () => {
+            try { const c = window.SillyTavern.getContext(); return JSON.stringify([c.characters[c.characterId]?.avatar, String(c.chatId || c.getCurrentChatId?.() || '').replace(/\.jsonl$/i, '')]); } catch { return '(boot)'; }
+        };
+        window.__PT_MARK_CHAT_DIRTY__ = () => {
+            const key = currentChatKey();
+            writeVersions.set(key, (writeVersions.get(key) || 0) + 1);
+            failedWrites.add(key); trace.chatProtection.writeFailed = true;
+        };
         window.__PT_CHAT_WRITE_READY__ = !protectExisting;
         const guardChatWrite = () => {
+            if (!parentHost.__PARALLEL_TAVERN_V2__?.ownsChild?.(window, id)) {
+                trace.chatProtection.blockedWrites++;
+                throw new Error('副窗口已关闭，已阻止晚到的聊天写入。');
+            }
+            if (window.__PT_CHAT_WRITE_READY__ && window.SillyTavern?.getContext) {
+                const c = window.SillyTavern.getContext();
+                const chat = c.chatId || c.getCurrentChatId?.();
+                const ownerAvatar = c.characters[c.characterId]?.avatar;
+                if (chat && ownerAvatar && !parentHost.__PARALLEL_TAVERN_V2__?.ownsChat?.(window, id, ownerAvatar, chat)) {
+                    failedWrites.add(currentChatKey()); trace.chatProtection.writeFailed = true;
+                    trace.chatProtection.blockedWrites++;
+                    throw new Error('这份聊天已在另一个窗口打开，已阻止重复写入。请保留回复，关闭冲突窗口后重试保存。');
+                }
+            }
             if (window.__PT_CHAT_WRITE_READY__) return;
             trace.chatProtection.blockedWrites++;
             throw new Error('历史聊天尚未验证，已阻止副窗口写入。请关闭此副窗口后重试，不要在空白对话中继续生成。');
@@ -1122,8 +1188,25 @@
             if (typeof core?.invoke === 'function') {
                 const childApi = Object.create(api), childCore = Object.create(core);
                 Object.defineProperty(childCore, 'invoke', { value: async (...args) => {
-                    if (/^(?:(?:begin|append|finish)_chat_commit|(?:save|write|append|truncate|delete|rename|commit)_(?:character_|group_)?chat(?:_|$))/.test(args[0])) guardChatWrite();
-                    return localizeBinary(await core.invoke(...args));
+                    const writesChat = /^(?:(?:begin|append|finish)_chat_commit|(?:save|write|append|truncate|delete|rename|commit)_(?:character_|group_)?chat(?:_|$))/.test(args[0]);
+                    if (writesChat) guardChatWrite();
+                    const writeKey = writesChat ? currentChatKey() : null;
+                    let writeVersion = writeVersions.get(writeKey) || 0;
+                    if (args[0] === 'begin_chat_commit') nativeCommitVersion = { key: writeKey, version: writeVersion };
+                    if (args[0] === 'finish_chat_commit' && nativeCommitVersion?.key === writeKey) writeVersion = nativeCommitVersion.version;
+                    if (writesChat) trace.chatProtection.pendingWrites++;
+                    try {
+                        const result = await (core.__ptChildInvoke ? core.__ptChildInvoke(...args) : core.invoke(...args));
+                        if (writesChat && /^(?:finish_chat_commit|(?:save|write|commit)_(?:character_|group_)?chat(?:_|$))/.test(args[0])) {
+                            if ((writeVersions.get(writeKey) || 0) === writeVersion) failedWrites.delete(writeKey);
+                            trace.chatProtection.writeFailed = failedWrites.size > 0;
+                            if (args[0] === 'finish_chat_commit') nativeCommitVersion = null;
+                        }
+                        return localizeBinary(result);
+                    } catch (error) {
+                        if (writesChat) { failedWrites.add(writeKey); trace.chatProtection.writeFailed = true; }
+                        throw error;
+                    } finally { if (writesChat) trace.chatProtection.pendingWrites--; }
                 }, configurable: true });
                 Object.defineProperty(childApi, 'core', { value: childCore, configurable: true });
                 window.__TAURI__ = childApi;
@@ -1142,6 +1225,18 @@
             const url = new URL(typeof input === 'string' || input instanceof URL ? String(input) : input.url, baseURL);
             const method = String(init.method || input?.method || 'GET').toUpperCase();
             if (url.origin === new URL(baseURL).origin && method !== 'GET' && /\/api\/chats\/(save|save-metadata|rename|delete)$/.test(url.pathname)) guardChatWrite();
+            const chatWrite = url.origin === new URL(baseURL).origin && method !== 'GET' && /\/api\/chats\/(save|save-metadata|rename|delete)$/.test(url.pathname);
+            if (chatWrite) init.__ptChildWrite = true;
+            let writeKey = chatWrite ? currentChatKey() : null;
+            if (chatWrite && typeof init.body === 'string') {
+                let payload; try { payload = JSON.parse(init.body); } catch {}
+                if (payload?.file_name) writeKey = JSON.stringify([payload.avatar_url || avatar, String(payload.file_name).replace(/\.jsonl$/i, '')]);
+                if (payload?.file_name && !parentHost.__PARALLEL_TAVERN_V2__?.ownsChat?.(window, id, payload.avatar_url, payload.file_name)) {
+                    trace.chatProtection.blockedWrites++;
+                    failedWrites.add(writeKey); trace.chatProtection.writeFailed = true;
+                    throw new Error('同一角色的这份聊天已在另一个窗口打开，已阻止重复写入。请保留此窗口的回复，关闭冲突窗口后重试保存。');
+                }
+            }
             if (url.origin === new URL(baseURL).origin && url.pathname.endsWith('/csrf-token')) {
                 const headers = parentHost.SillyTavern?.getContext()?.getRequestHeaders?.();
                 const token = headers && new Headers(headers).get('x-csrf-token');
@@ -1160,8 +1255,19 @@
                 if (route !== '(other local resource)' && trace.requests.length < 80) { request = { route, state: 'pending', started: Date.now() }; trace.requests.push(request); }
             }
             let response;
-            try { response = await next(input, init); if (request) { request.state = 'responded'; request.status = response.status; request.elapsedMs = Date.now() - request.started; } }
-            catch (error) { if (request) { request.state = 'rejected'; request.elapsedMs = Date.now() - request.started; } throw error; }
+            const writeVersion = writeVersions.get(writeKey) || 0;
+            if (chatWrite) trace.chatProtection.pendingWrites++;
+            try {
+                response = await next(input, init);
+                if (chatWrite) {
+                    if (!response.ok) failedWrites.add(writeKey);
+                    else if (/\/api\/chats\/save$/.test(url.pathname) && (writeVersions.get(writeKey) || 0) === writeVersion) failedWrites.delete(writeKey);
+                    trace.chatProtection.writeFailed = failedWrites.size > 0;
+                }
+                if (request) { request.state = 'responded'; request.status = response.status; request.elapsedMs = Date.now() - request.started; }
+            }
+            catch (error) { if (chatWrite) { failedWrites.add(writeKey); trace.chatProtection.writeFailed = true; } if (request) { request.state = 'rejected'; request.elapsedMs = Date.now() - request.started; } throw error; }
+            finally { if (chatWrite) trace.chatProtection.pendingWrites--; }
             if (url.origin === new URL(baseURL).origin && url.pathname.endsWith('/api/settings/get') && response.ok) {
                 const payload = await response.clone().json();
                 if (payload.hash_algorithm && payload.settings_hash) localRevision = { hash_algorithm: payload.hash_algorithm, settings_hash: payload.settings_hash };
@@ -1216,8 +1322,10 @@
             const historyResponse = await host.fetch(new URL('api/characters/chats', host.location.href).href, {
                 method: 'POST', headers: ctx(host).getRequestHeaders(), body: JSON.stringify({ avatar_url: avatar, ch_name: character.name }),
             });
+            if (disposed || sessions.get(id) !== s) return;
             if (!historyResponse.ok) throw new Error('无法确认历史聊天，已停止打开副窗口，以免误建新档。');
             const history = await historyResponse.json();
+            if (disposed || sessions.get(id) !== s) return;
             if (!history || typeof history !== 'object' || history.error) throw new Error('聊天列表返回异常，已停止打开副窗口。');
             const chats = Object.values(history).filter(c => c && typeof c.file_name === 'string');
             if (Object.values(history).length !== chats.length) throw new Error('无法识别聊天列表，已停止打开，未创建新档。');
@@ -1284,6 +1392,7 @@
             s.cleanups.push(() => host.clearInterval(watch));
             armLoadWarning(s);
         } catch (error) {
+            if (disposed || sessions.get(id) !== s) return;
             recordPageStage('副窗口加载失败');
             s.status = '加载失败'; s.error = shortError(error); queueRender(); notify(s.error);
         }
@@ -1329,6 +1438,8 @@
             if (!c.eventSource?.on || !events || typeof c.selectCharacterById !== 'function') return false;
             s.win = w; s.phase = '已找到聊天上下文，等待 APP_READY';
             const ready = () => {
+                if (s.opening || s.ready || disposed || sessions.get(id) !== s) return;
+                s.opening = true;
                 s.appReadyReceived = true;
                 if (!s.error) s.status = '正在打开角色…';
                 // Keep request diagnostics running through target chat loading.
@@ -1345,6 +1456,7 @@
                         // field before loading the character's full card.
                         if (s.targetChat) latest.characters[index].chat = s.targetChat;
                         await latest.selectCharacterById(index, s.targetChat ? { chatFile: s.targetChat } : {});
+                        if (disposed || sessions.get(id) !== s) return;
                         const loaded = ctx(w);
                         if (loaded.characters[loaded.characterId]?.avatar !== s.targetAvatar) throw new Error('目标角色未成功打开，已保留原会话');
                         if (s.targetChat) {
@@ -1374,7 +1486,7 @@
                         if (!sessions.has(id) || disposed) return;
                         identity(s); setActive(id);
                         recordPageStage('副窗口就绪');
-                    } catch (error) { host.clearTimeout(s.timeout); s.status = '加载失败'; s.error = shortError(error); s.phase = '目标聊天读取失败'; queueRender(); notify(s.error); }
+                    } catch (error) { if (disposed || sessions.get(id) !== s) return; host.clearTimeout(s.timeout); s.status = '加载失败'; s.error = shortError(error); s.phase = '目标聊天读取失败'; queueRender(); notify(s.error); }
                 }, 0);
             };
             on(c.eventSource, events.APP_INITIALIZED || 'app_initialized', () => { s.appInitializedReceived = true; s.phase = 'APP_INITIALIZED 已触发，等待启动收尾'; }, s);
@@ -1459,7 +1571,7 @@
         render(); await copy();
     }
     function dispose() {
-        if ([...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { notify('子会话仍在运行，请先停止或等待完成再卸载。'); return false; }
+        if ([...sessions.values()].some(isBusy)) { notify('会话仍在生成、保存或保存失败，请完成保存后再卸载。'); return false; }
         disposed = true;
         for (const s of sessions.values()) { host.clearTimeout(s.timeout); for (const clean of s.cleanups) clean(); s.frame?.remove(); }
         for (const clean of teardown) clean();
@@ -1487,6 +1599,22 @@
                 }
             });
         }, attachChild, reportChild, diagnostics, dispose,
+        mode: 'multi-window',
+        ownsChild: (w, id) => !disposed && sessions.get(id)?.win === w && sessions.get(id)?.frame?.contentWindow === w,
+        ownsChat: (w, id, avatar, chat) => {
+            const session = sessions.get(id);
+            if (disposed || session?.win !== w) return false;
+            const ownerAvatar = avatar || session.avatar || session.targetAvatar;
+            return ![...sessions.values()].some(other => {
+                if (other === session) return false;
+                identity(other);
+                return (other.avatar || other.targetAvatar) === ownerAvatar && (other.chatId || other.targetChat) === String(chat).replace(/\.jsonl$/i, '');
+            });
+        },
+        canReload: () => [...sessions.values()].every(s => {
+            if (!s.ready || isBusy(s) || s.profile?.blocked) return false;
+            try { return !s.win?.document.querySelector('#send_textarea')?.value; } catch { return false; }
+        }),
         setNightMode,
         getActiveWindow: () => sessions.get(activeId)?.win || host,
         setLauncherVisible: value => {
@@ -1496,20 +1624,93 @@
         },
         requestDispose: () => {
             disposeRequested = true;
-            if (![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) dispose();
+            if (![...sessions.values()].some(isBusy)) dispose();
             else notify('脚本已停用，将在现有生成结束后移除并行界面。');
         },
     };
+    // Observe the main native page too: saveChat may swallow transport errors.
+    // Child-bridged requests are explicitly tagged and remain child-owned.
+    const mainWriteState = main.writeProtection = { pendingWrites: 0, writeFailed: false };
+    const mainFailedWrites = new Set(), mainWriteVersions = new Map();
+    const mainChatKey = () => {
+        const c = ctx(host);
+        return JSON.stringify([c.characters[c.characterId]?.avatar, String(c.chatId || c.getCurrentChatId?.() || '').replace(/\.jsonl$/i, '')]);
+    };
+    const oldDirtyMarker = host.__PT_MARK_CHAT_DIRTY__;
+    host.__PT_MARK_CHAT_DIRTY__ = () => {
+        const key = mainChatKey(); mainWriteVersions.set(key, (mainWriteVersions.get(key) || 0) + 1);
+        mainFailedWrites.add(key); mainWriteState.writeFailed = true;
+    };
+    const originalMainFetch = host.fetch;
+    const observedMainFetch = async (input, init = {}) => {
+        const url = new URL(typeof input === 'string' || input instanceof host.URL ? String(input) : input.url, host.location.href);
+        const method = String(init.method || input?.method || 'GET').toUpperCase();
+        const chatWrite = !disposed && !init.__ptChildWrite && url.origin === host.location.origin && method !== 'GET' && /\/api\/chats\/(save|save-metadata|rename|delete)$/.test(url.pathname);
+        if (!chatWrite) return originalMainFetch.call(host, input, init);
+        let key = mainChatKey();
+        if (typeof init.body === 'string') {
+            let payload; try { payload = JSON.parse(init.body); } catch {}
+            if (payload?.file_name) key = JSON.stringify([payload.avatar_url || ctx(host).characters[ctx(host).characterId]?.avatar, String(payload.file_name).replace(/\.jsonl$/i, '')]);
+        }
+        const version = mainWriteVersions.get(key) || 0;
+        mainWriteState.pendingWrites++;
+        try {
+            const response = await originalMainFetch.call(host, input, init);
+            if (!response.ok) mainFailedWrites.add(key);
+            else if (/\/api\/chats\/save$/.test(url.pathname) && (mainWriteVersions.get(key) || 0) === version) mainFailedWrites.delete(key);
+            mainWriteState.writeFailed = mainFailedWrites.size > 0;
+            return response;
+        } catch (error) { mainFailedWrites.add(key); mainWriteState.writeFailed = true; throw error; }
+        finally { mainWriteState.pendingWrites--; }
+    };
+    host.fetch = observedMainFetch;
+    const originalMainApi = host.__TAURI__;
+    let observedMainApi;
+    if (typeof originalMainApi?.core?.invoke === 'function') {
+        const originalCore = originalMainApi.core;
+        const originalInvoke = (...args) => originalCore.invoke(...args);
+        const observedCore = Object.create(originalCore);
+        let commitVersion;
+        Object.defineProperty(observedCore, '__ptChildInvoke', { value: originalInvoke });
+        Object.defineProperty(observedCore, 'invoke', { value: async (...args) => {
+            const write = !disposed && /^(?:(?:begin|append|finish)_chat_commit|(?:save|write|append|truncate|delete|rename|commit)_(?:character_|group_)?chat(?:_|$))/.test(args[0]);
+            if (!write) return originalInvoke(...args);
+            const key = mainChatKey();
+            let version = mainWriteVersions.get(key) || 0;
+            if (args[0] === 'begin_chat_commit') commitVersion = { key, version };
+            if (args[0] === 'finish_chat_commit' && commitVersion?.key === key) version = commitVersion.version;
+            mainWriteState.pendingWrites++;
+            try {
+                const result = await originalInvoke(...args);
+                if (/^(?:finish_chat_commit|(?:save|write|commit)_(?:character_|group_)?chat(?:_|$))/.test(args[0])) {
+                    if ((mainWriteVersions.get(key) || 0) === version) mainFailedWrites.delete(key);
+                    if (args[0] === 'finish_chat_commit') commitVersion = null;
+                }
+                mainWriteState.writeFailed = mainFailedWrites.size > 0;
+                return result;
+            } catch (error) { mainFailedWrites.add(key); mainWriteState.writeFailed = true; throw error; }
+            finally { mainWriteState.pendingWrites--; }
+        } });
+        observedMainApi = Object.create(originalMainApi);
+        Object.defineProperty(observedMainApi, 'core', { value: observedCore });
+        host.__TAURI__ = observedMainApi;
+    }
+    teardown.push(() => {
+        if (host.fetch === observedMainFetch) host.fetch = originalMainFetch;
+        if (observedMainApi && host.__TAURI__ === observedMainApi) host.__TAURI__ = originalMainApi;
+        if (oldDirtyMarker === undefined) delete host.__PT_MARK_CHAT_DIRTY__;
+        else host.__PT_MARK_CHAT_DIRTY__ = oldDirtyMarker;
+    });
     attachSession(main);
     const events = ctx(host).eventTypes || ctx(host).event_types;
     on(ctx(host).eventSource, events.APP_READY || 'app_ready', () => { appReady = true; queueRender(); }, main);
     const refresh = host.setInterval(() => {
-        if (disposeRequested && ![...sessions.values()].some(s => s.id !== 'main' && isBusy(s))) { dispose(); return; }
+        if (disposeRequested && ![...sessions.values()].some(isBusy)) { dispose(); return; }
         refreshLiveStatus();
     }, 1000);
     teardown.push(() => host.clearInterval(refresh));
     const unload = event => {
-        if ([...sessions.values()].some(isBusy)) { event.preventDefault(); event.returnValue = ''; }
+        if (!host[KEY]?.canReload?.()) { event.preventDefault(); event.returnValue = ''; }
     };
     host.addEventListener('beforeunload', unload);
     const leaving = () => { try { host.sessionStorage.setItem('parallel-tavern.last-stage', JSON.stringify({ ...currentPageStage, pageExitObserved: true })); } catch {} };
