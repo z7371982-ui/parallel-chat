@@ -9,7 +9,7 @@ const KEY = 'parallel_tavern';
 const CONTROLLER = '__PARALLEL_TAVERN_V2__';
 const nativeProxyModules = new WeakMap();
 const profileInstances = new WeakMap();
-const VERSION = '0.7.0-unified-r3';
+const VERSION = '0.7.1';
 
 function chooseRuntimeMode(settings) {
     if (['multi-window', 'low-memory'].includes(settings.runtimeMode)) return settings.runtimeMode;

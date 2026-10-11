@@ -1,11 +1,11 @@
-/* 并行对话 0.7.0-unified-r3 — 低内存单页面后台生成（基于 0.6.8-r7）。
+/* 并行对话 0.7.1 — 低内存单页面后台生成（基于 0.6.8-r7）。
  *
  * 不再为每个会话启动第二个酒馆页面（iframe）。切换对话时，只把正在进行的
  * 生成请求留在后台继续接收；切回该对话后，由酒馆原生流程把保存下来的响应
  * 重新走一遍（正则、变量脚本、保存都是原生逻辑）。不自行拼接提示词，不直接
  * 写聊天文件，不保存 API 密钥。
  */
-const VERSION = '0.7.0-unified-r3';
+const VERSION = '0.7.1';
 const KEY = '__PARALLEL_TAVERN_V2__';
 const MAX_SESSIONS = 3;
 const STORE = 'parallel-tavern.jobs.v1';
@@ -552,11 +552,12 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
     function restoreReading(key) {
         cancelRestore();
         const saved = key && readings.get(key);
-        // 有后台回复要写回时不恢复，让酒馆自己滚到新回复。
-        if (!saved || saved.bottom || saved.mesid == null || pendingWrite(key)) return;
-        restoringUntil = Date.now() + 1600;
+        // 有后台回复要接回时也按楼层恢复：新回复追加在末尾，不影响正在读的位置。
+        if (!saved || saved.bottom || saved.mesid == null) return;
+        const span = pendingWrite(key) ? 4000 : 2600;
+        restoringUntil = Date.now() + span;
         let cancelled = false;
-        const timers = [], inputs = ['wheel', 'touchstart', 'pointerdown', 'keydown'];
+        const timers = [], inputs = ['wheel', 'touchmove', 'keydown'];
         const cancel = () => {
             if (cancelled) return;
             cancelled = true; restoringUntil = 0;
@@ -565,7 +566,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         };
         for (const name of inputs) host.addEventListener(name, cancel, { capture: true, passive: true });
         const apply = () => {
-            if (cancelled || curKey !== key || pendingWrite(key)) return;
+            if (cancelled || curKey !== key) return;
             const el = scroller();
             const anchor = el && [...el.querySelectorAll('.mes[mesid]')].find(node => node.getAttribute('mesid') === saved.mesid);
             if (!anchor) return;
@@ -574,8 +575,9 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             if (Math.abs(delta) > 1) el.scrollTop += delta;
         };
         // 酒馆加载完会滚到底，图片加载还会改变高度：短时间内多校正几次，用户一操作就停。
-        for (const ms of [0, 120, 350, 800, 1400]) timers.push(later(apply, ms));
-        timers.push(later(cancel, 1600));
+        // 手机上长聊天渲染更慢，接回回复时酒馆还会再滚一次，校正时间相应放宽。
+        for (const ms of [0, 120, 350, 800, 1400, 2200, ...(span > 2600 ? [3000, 3800] : [])]) timers.push(later(apply, ms));
+        timers.push(later(cancel, span));
         cancelRestore = cancel;
     }
 
@@ -1967,8 +1969,9 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             const status = stateOf(session);
             if (card.dataset.state !== status.state) { render(); return; }
             const label = card.querySelector('.pt-status'); if (label && label.textContent !== status.label) label.textContent = status.label;
-            const snippet = card.querySelector('.pt-preview'), text = preview(session).replace(/\s+/g, ' ') || '点击进入对话';
-            if (snippet && snippet.textContent !== text) snippet.textContent = text;
+            const snippet = card.querySelector('.pt-preview'), mark = (session.job?.bytes ?? -1) + ':' + (session.key === curKey ? ctx().chat?.length : '');
+            // 没有新数据就不重算预览，减少生成中每秒的解析和字符串处理。
+            if (snippet && snippet.dataset.mark !== mark) { snippet.dataset.mark = mark; const text = preview(session).replace(/\s+/g, ' ') || '点击进入对话'; if (snippet.textContent !== text) snippet.textContent = text; }
         }
     }
     const liveTimer = host.setInterval(refreshLive, 1000);
