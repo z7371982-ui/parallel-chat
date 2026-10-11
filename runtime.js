@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.7.1 — Tavern Helper global script.
+/* Parallel Tavern 0.7.3 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.7.1 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.7.3 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,7 +110,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.7.1';
+    const VERSION = '0.7.3';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let previousPageStage = null;
     let currentPageStage = null;
@@ -1486,7 +1486,11 @@
                         host.clearTimeout(s.timeout); attachSession(s);
                         await s.profile?.ready;
                         if (!sessions.has(id) || disposed) return;
-                        identity(s); setActive(id);
+                        identity(s);
+                        // 只有宿主弹出正则/脚本确认时才切过去（见 revealStartupPopup）；
+                        // 否则新卡在后台就绪，留在当前对话，点卡片再切换。
+                        if (activeId === id) setActive(id);
+                        else { queueRender(); notify(`卡${[...sessions.keys()].indexOf(id) + 1}「${s.title}」已就绪，点卡片即可切换。`); }
                         recordPageStage('副窗口就绪');
                     } catch (error) { if (disposed || sessions.get(id) !== s) return; host.clearTimeout(s.timeout); s.status = '加载失败'; s.error = shortError(error); s.phase = '目标聊天读取失败'; queueRender(); notify(s.error); }
                 }, 0);

@@ -56,7 +56,16 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
     const read = () => selection(context(), win.document);
     const signature = value => JSON.stringify(value);
     const usesProxy = () => context().mainApi === 'openai' && proxySources.has(context().chatCompletionSettings?.chat_completion_source);
-    const hasProfile = () => enabled() && Object.hasOwn(settings.characterProfiles || {}, avatar());
+    // 角色专属设置优先；没有专属设置的角色一律使用默认配置。
+    const target = id => !enabled() || !id ? null : Object.hasOwn(settings.characterProfiles || {}, id) ? settings.characterProfiles[id] : settings.defaultProfile || null;
+    const hasProfile = () => !!target(avatar());
+    let appReadySeen = false;
+    // 第一次就绪时把当前正在用的设置记为默认配置（只在主页面，且仅当还没有默认配置）。
+    const captureDefault = () => {
+        if (stopped || !enabled() || !appReadySeen || settings.defaultProfile || win !== win.top || applying || waitingPreset) return;
+        const value = read();
+        if (value) { settings.defaultProfile = value; save(); }
+    };
     const restorePending = () => hasProfile() && observedAvatar !== avatar();
     const record = () => {
         if (stopped || applying || waitingPreset || !nativeLoaded || restoreFailed || synchronizingProxy) return;
@@ -167,8 +176,8 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
         if (stopped) return;
         const id = avatar();
         if (!id) { observedAvatar = null; return; }
-        const hasSaved = enabled() && Object.hasOwn(settings.characterProfiles || {}, id);
-        if (!hasSaved) {
+        const saved = target(id);
+        if (!saved) {
             // No role record means use this document's current native settings.
             // Do not inherit another role's snapshot, change fields, or save.
             initialSelection = null;
@@ -177,7 +186,7 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
             return;
         }
         if (busy()) return;
-        const value = settings.characterProfiles[id];
+        const value = saved;
         // Old snapshots contribute their name only; no credentials are copied.
         let completed = false;
         applying = true;
@@ -233,14 +242,12 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
             // A stale restore must not mark the next role as already restored.
             if (!stopped && avatar() === id) {
                 observedAvatar = id; observed = signature(read());
-                if (completed && enabled() && !restoreFailed) { initialSelection = null; pendingEdit = true; record(); }
+                if (completed) initialSelection = null;
             }
         }
     }
     function activate() {
-        // Only actual local changes update the shared profile. Viewing an older
-        // window must not overwrite a newer selection made in another window.
-        record();
+        captureDefault();
         const requestedAvatar = avatar();
         queue = queue.then(async () => {
             if (stopped || avatar() !== requestedAvatar) return;
@@ -267,7 +274,6 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
         // Only actual BEFORE/AFTER lifecycle events own waitingPreset. A
         // delegated DOM change can arrive after AFTER and must not re-arm it.
         if (/^(main_api|chat_completion_source|textgen_type|settings_preset_|model_|custom_model_id|azure_openai_model|openai_proxy_|openai_reverse_proxy)/.test(id) || id.endsWith('_model')) {
-            if (!applying && explicitEdit) pendingEdit = true;
             schedule();
         }
         if (!waitingPreset) Promise.resolve().then(record);
@@ -299,7 +305,6 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
             Promise.resolve().then(() => {
                 if (!stopped && enabled() && !applying) {
                     synchronizeProxy();
-                    pendingEdit = true; record(); schedule();
                 }
             });
         }
@@ -333,13 +338,7 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
     on(events.SETTINGS_UPDATED, schedule);
     on(events.CHATCOMPLETION_MODEL_CHANGED, schedule);
     on(events.CHAT_CHANGED, activate);
-    on(events.GENERATION_ENDED, () => {
-        // Session/native busy flags are updated by other listeners in the same
-        // event dispatch. Restore only after those listeners have finished.
-        win.clearTimeout(resumeTimer);
-        resumeTimer = win.setTimeout(() => { void activate(); }, 0);
-    });
-    on(events.APP_READY, activate);
+    on(events.APP_READY, () => { appReadySeen = true; return activate(); });
     function prepareSend({ stage = 'ui' } = {}) {
         if (!enabled()) return read();
         if (applying || waitingPreset || restorePending()) throw new Error('角色配置尚未准备完成');
@@ -369,12 +368,35 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
             record();
             return value;
         },
+        // 把当前设置存为默认配置（没有专属设置的角色都用它）。
+        saveDefault() {
+            if (stopped || !enabled()) throw new Error('请先开启按角色记住设置');
+            if (applying || waitingPreset || busy()) throw new Error('请等待设置加载、生成和保存结束');
+            const value = read();
+            if (!value) throw new Error('当前没有可记录的预设和模型');
+            if (!nativeLoaded) throw new Error('原生配置列表尚未连接，请稍后再试');
+            if (usesProxy()) resolveProxy(value.proxy);
+            settings.defaultProfile = value; save();
+            return value;
+        },
+        // 删除本角色的专属设置，并立即改用默认配置。
+        clearCurrent() {
+            if (stopped || !enabled()) throw new Error('请先开启按角色记住设置');
+            if (applying || waitingPreset || busy()) throw new Error('请等待设置加载、生成和保存结束');
+            const id = avatar();
+            if (!id) throw new Error('当前没有打开单角色聊天');
+            if (!Object.hasOwn(settings.characterProfiles || {}, id)) return false;
+            delete settings.characterProfiles[id]; save();
+            observedAvatar = null; restoreFailed = false;
+            void activate();
+            return true;
+        },
         get blocked() { return enabled() && (applying || waitingPreset || restoreFailed || restorePending() || hasProfile() && !nativeLoaded); },
         capture() {
             if (enabled() && (hasProfile() && !nativeLoaded || applying || waitingPreset || synchronizingProxy || restoreFailed)) throw new Error('当前预设正在切换或尚未恢复，请稍后再打开角色');
             const value = read();
             return value ? { ...value, ...(value.proxy ? { proxy: { ...value.proxy } } : {}) } : null;
         },
-        dispose() { record(); stopped = true; win.clearTimeout(timer); win.clearTimeout(resumeTimer); cleanups.forEach(fn => fn()); },
+        dispose() { stopped = true; win.clearTimeout(timer); win.clearTimeout(resumeTimer); cleanups.forEach(fn => fn()); },
     };
 }

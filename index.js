@@ -9,7 +9,7 @@ const KEY = 'parallel_tavern';
 const CONTROLLER = '__PARALLEL_TAVERN_V2__';
 const nativeProxyModules = new WeakMap();
 const profileInstances = new WeakMap();
-const VERSION = '0.7.1';
+const VERSION = '0.7.3';
 
 function chooseRuntimeMode(settings) {
     if (['multi-window', 'low-memory'].includes(settings.runtimeMode)) return settings.runtimeMode;
@@ -82,6 +82,11 @@ async function initialize() {
         owner.dispatchEvent(new owner.Event('pt-extension-settings'));
     };
     if (typeof settings.showLauncher !== 'boolean') settings.showLauncher = true;
+    if (!child && settings.profileSchema !== 2) {
+        // 0.7.3 起角色设置只在手动保存时记录；旧版自动生成的记录无法分辨，一次性清空。
+        settings.characterProfiles = {}; delete settings.defaultProfile;
+        settings.profileSchema = 2; saveSettingsDebounced();
+    }
     if (!child) {
     window.__PT_SETTINGS_BRIDGE__ = { settings, persist };
     window.__PT_EXTENSION_CONFIG__ = settings;
@@ -117,9 +122,10 @@ async function initialize() {
                 <small>默认关闭。开启后点击头像直达对应窗口，点击文字区域仍打开面板。</small>
                 <label class="checkbox_label" for="pt-extension-night"><input id="pt-extension-night" type="checkbox"><span>夜间模式</span></label>
                 <label class="checkbox_label" for="pt-extension-character-settings"><input id="pt-extension-character-settings" type="checkbox"><span>按角色记住预设、模型与代理</span></label>
-                <small>只记住角色的预设、代理预设名称和模型；代理网站与密钥始终读取当前酒馆原生预设。请在主页面保存代理配置。同一角色的不同聊天共用选择，正在生成或保存时不更换。</small>
-                <button type="button" class="menu_button" id="pt-extension-adopt-profile">以当前选择更新本角色</button>
-                <small>无角色记录时保留现场设置。此按钮只在你明确点击后记录当前窗口的预设、模型和代理名称，可修正旧记录。</small>
+                <small>没有专属设置的角色使用默认配置（首次启动时的预设、模型与代理）。平时修改设置只对当前生效，不会自动记录。代理网站与密钥始终读取酒馆原生预设。</small>
+                <button type="button" class="menu_button" id="pt-extension-adopt-profile">保存为本角色设置</button>
+                <button type="button" class="menu_button" id="pt-extension-clear-profile">清除本角色设置</button>
+                <button type="button" class="menu_button" id="pt-extension-default-profile">以当前设置为默认配置</button>
                 <div><button type="button" class="menu_button" id="pt-extension-open">打开并行面板</button></div>
                 <small id="pt-extension-status" role="status"></small>
             </div>
@@ -135,8 +141,23 @@ async function initialize() {
             const profile = profileInstances.get(active);
             if (!profile) throw new Error('当前窗口的角色设置尚未连接，请稍后再试');
             profile.adoptCurrent();
-            status.textContent = '当前角色的选择已更新；只保存预设、模型和代理名称。';
+            status.textContent = '已保存为本角色设置；只保存预设、模型和代理名称。';
         } catch (error) { status.textContent = String(error.message || '角色选择未保存'); }
+    });
+    const profileAction = (id, run) => root.querySelector(id).addEventListener('click', () => {
+        const active = owner[CONTROLLER]?.getActiveWindow?.() || owner;
+        try {
+            const profile = profileInstances.get(active);
+            if (!profile) throw new Error('当前窗口的角色设置尚未连接，请稍后再试');
+            status.textContent = run(profile);
+        } catch (error) { status.textContent = String(error.message || '操作失败'); }
+    });
+    profileAction('#pt-extension-clear-profile', p => p.clearCurrent() ? '已清除本角色设置，改用默认配置。' : '这个角色本来就没有专属设置，正在使用默认配置。');
+    profileAction('#pt-extension-default-profile', () => {
+        // 默认配置以主页面当前设置为准。
+        const main = profileInstances.get(owner);
+        if (!main) throw new Error('主页面的角色设置尚未连接，请稍后再试');
+        main.saveDefault(); return '已把当前设置存为默认配置。';
     });
     const mode = root.querySelector('#pt-extension-mode');
     mode.value = settings.runtimeMode;
