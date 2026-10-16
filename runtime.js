@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.7.3 — Tavern Helper global script.
+/* Parallel Tavern 0.7.4 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -39,7 +39,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.7.3 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.7.4 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -110,7 +110,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.7.3';
+    const VERSION = '0.7.4';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let previousPageStage = null;
     let currentPageStage = null;
@@ -285,6 +285,9 @@
 #pt-panel #pt-picker .pt-heading{font:600 18px/1.4 system-ui,sans-serif;letter-spacing:0}
 #pt-search{display:block;width:calc(100% - 40px);margin:0 20px 12px;padding:12px 14px;border:1px solid #e8e0df;border-radius:13px;background:#f5f0ee;color:#54454d;font:13px/1.5 system-ui;box-sizing:border-box}
 #pt-search::placeholder{color:#a6979d}
+#pt-panel .pt-search-bar{display:flex;gap:8px;margin:0 20px 12px}
+#pt-panel .pt-search-bar #pt-search{flex:1;width:auto;min-width:0;margin:0}
+#pt-sort{flex-shrink:0;width:auto;max-width:40%;padding:12px 10px;border:1px solid #e8e0df;border-radius:13px;background:#f5f0ee;color:#54454d;font:13px/1.5 system-ui;box-sizing:border-box}
 #pt-character-list{padding:0 12px 16px}
 #pt-character-list .pt-button{display:block;width:100%;background:transparent;text-align:left;margin:3px 0;overflow-wrap:anywhere}
 #pt-picker>.pt-muted,#pt-picker>textarea,#pt-picker>.pt-button{margin:10px 20px;max-width:calc(100% - 40px)}
@@ -354,7 +357,7 @@
     const picker = element('section'); picker.id = 'pt-picker'; picker.hidden = true;
     picker.setAttribute('aria-label', '选择并行角色'); picker.dataset.ttMobileSurface = 'free-window';
     const toast = element('div'); toast.id = 'pt-toast'; toast.hidden = true; toast.setAttribute('role', 'status');
-    style.textContent += "\n#pt-panel[data-night=\"true\"],#pt-launcher[data-night=\"true\"],#pt-toast[data-night=\"true\"]{color-scheme:dark;background:#242126;border-color:#494149;color:#eee7eb;box-shadow:0 12px 40px #0005;scrollbar-color:#655762 transparent}\n#pt-panel[data-night=\"true\"] .pt-heading,#pt-panel[data-night=\"true\"] .pt-title{color:#f2e9ee}\n#pt-panel[data-night=\"true\"] .pt-button{background:#3b333b;color:#ede1e7}\n#pt-panel[data-night=\"true\"] .pt-button:hover{background:#51434f;color:#fff}\n#pt-panel[data-night=\"true\"] .pt-add,#pt-panel[data-night=\"true\"] .pt-welcome .pt-button{background:#d2b5c5;color:#281f26}\n#pt-panel[data-night=\"true\"] .pt-card.pt-active,#pt-panel[data-night=\"true\"] .pt-menu{background:#302a31}\n#pt-panel[data-night=\"true\"] .pt-session-open,#pt-panel[data-night=\"true\"] .pt-icon-button,#pt-panel[data-night=\"true\"] #pt-character-list .pt-button{background:transparent}\n#pt-panel[data-night=\"true\"] .pt-session-open:hover{background:#433743}\n#pt-panel[data-night=\"true\"] .pt-footer{background:#242126;border-color:#494149;color:#c2b2bc}\n#pt-panel[data-night=\"true\"] .pt-section-label,#pt-panel[data-night=\"true\"] .pt-character-choice{border-color:#494149;color:#bfb0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-subheading,.pt-overview,.pt-current,.pt-preview,.pt-status,.pt-muted,.pt-chat-name),#pt-launcher[data-night=\"true\"] .pt-dock-note{color:#c2b0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-completed,.pt-ready-count),#pt-panel[data-night=\"true\"] .pt-card[data-unread=\"true\"] .pt-status{color:#edb1a4}\n#pt-panel[data-night=\"true\"] .pt-card[data-busy=\"true\"] .pt-status{color:#d2acd1}\n#pt-panel[data-night=\"true\"] .pt-error{color:#ffb3b3}\n#pt-panel[data-night=\"true\"] .pt-portrait,#pt-launcher[data-night=\"true\"] .pt-portrait{background:#51424c;color:#efcadc;border-color:#242126}\n#pt-panel[data-night=\"true\"] #pt-search,#pt-panel[data-night=\"true\"] #pt-diagnostic-text{background:#302a31!important;color:#ede1e7!important;border-color:#675561!important;color-scheme:dark}\n#pt-panel[data-night=\"true\"] #pt-search::placeholder{color:#bcaab5}\n#pt-panel[data-night=\"true\"] #pt-history-list .pt-button{background:#38303a;color:#eee4eb}\n#pt-panel[data-night=\"true\"] #pt-character-list .pt-character-choice>.pt-button:last-child{background:#493843;border-color:#806372;color:#f3dce7}\n#pt-panel[data-night=\"true\"] .pt-footer .pt-button{color:#d0bec9}\n\n";
+    style.textContent += "\n#pt-panel[data-night=\"true\"],#pt-launcher[data-night=\"true\"],#pt-toast[data-night=\"true\"]{color-scheme:dark;background:#242126;border-color:#494149;color:#eee7eb;box-shadow:0 12px 40px #0005;scrollbar-color:#655762 transparent}\n#pt-panel[data-night=\"true\"] .pt-heading,#pt-panel[data-night=\"true\"] .pt-title{color:#f2e9ee}\n#pt-panel[data-night=\"true\"] .pt-button{background:#3b333b;color:#ede1e7}\n#pt-panel[data-night=\"true\"] .pt-button:hover{background:#51434f;color:#fff}\n#pt-panel[data-night=\"true\"] .pt-add,#pt-panel[data-night=\"true\"] .pt-welcome .pt-button{background:#d2b5c5;color:#281f26}\n#pt-panel[data-night=\"true\"] .pt-card.pt-active,#pt-panel[data-night=\"true\"] .pt-menu{background:#302a31}\n#pt-panel[data-night=\"true\"] .pt-session-open,#pt-panel[data-night=\"true\"] .pt-icon-button,#pt-panel[data-night=\"true\"] #pt-character-list .pt-button{background:transparent}\n#pt-panel[data-night=\"true\"] .pt-session-open:hover{background:#433743}\n#pt-panel[data-night=\"true\"] .pt-footer{background:#242126;border-color:#494149;color:#c2b2bc}\n#pt-panel[data-night=\"true\"] .pt-section-label,#pt-panel[data-night=\"true\"] .pt-character-choice{border-color:#494149;color:#bfb0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-subheading,.pt-overview,.pt-current,.pt-preview,.pt-status,.pt-muted,.pt-chat-name),#pt-launcher[data-night=\"true\"] .pt-dock-note{color:#c2b0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-completed,.pt-ready-count),#pt-panel[data-night=\"true\"] .pt-card[data-unread=\"true\"] .pt-status{color:#edb1a4}\n#pt-panel[data-night=\"true\"] .pt-card[data-busy=\"true\"] .pt-status{color:#d2acd1}\n#pt-panel[data-night=\"true\"] .pt-error{color:#ffb3b3}\n#pt-panel[data-night=\"true\"] .pt-portrait,#pt-launcher[data-night=\"true\"] .pt-portrait{background:#51424c;color:#efcadc;border-color:#242126}\n#pt-panel[data-night=\"true\"] #pt-search,#pt-panel[data-night=\"true\"] #pt-sort,#pt-panel[data-night=\"true\"] #pt-diagnostic-text{background:#302a31!important;color:#ede1e7!important;border-color:#675561!important;color-scheme:dark}\n#pt-panel[data-night=\"true\"] #pt-search::placeholder{color:#bcaab5}\n#pt-panel[data-night=\"true\"] #pt-history-list .pt-button{background:#38303a;color:#eee4eb}\n#pt-panel[data-night=\"true\"] #pt-character-list .pt-character-choice>.pt-button:last-child{background:#493843;border-color:#806372;color:#f3dce7}\n#pt-panel[data-night=\"true\"] .pt-footer .pt-button{color:#d0bec9}\n\n";
     doc.body.append(shell, launcher, panel, toast, completionBadge);
     const safeArea = element('div');
     safeArea.dataset.ttMobileSurface = 'none';
@@ -854,6 +857,25 @@
         }
         const live = panel.querySelector('.pt-live-count'); if (live) live.textContent = `${[...sessions.values()].filter(isGenerating).length} 正在回复`;
     }
+    // 角色搜索的排序方式，和名称搜索叠加使用；选择记在本机。
+    const SORT_KEY = 'parallel-tavern.picker-sort';
+    const SORT_MODES = [['recent', '最近'], ['newest', '最新'], ['most-chat', '最多聊天'], ['least-chat', '最少聊天']];
+    function sortSelect() {
+        const select = element('select'); select.id = 'pt-sort'; select.setAttribute('aria-label', '角色排序方式');
+        for (const [value, label] of SORT_MODES) { const option = element('option', '', label); option.value = value; select.append(option); }
+        let saved = 'recent';
+        try { saved = host.localStorage.getItem(SORT_KEY) || saved; } catch {}
+        select.value = SORT_MODES.some(([value]) => value === saved) ? saved : 'recent';
+        return select;
+    }
+    function saveSortMode(value) { try { host.localStorage.setItem(SORT_KEY, value); } catch {} }
+    function sortCharacters(characters, mode, recentTime) {
+        const added = c => chatTimestamp(c.date_added) || chatTimestamp(c.create_date);
+        const size = c => Number(c.chat_size) || 0;
+        const key = { newest: c => added(c), 'most-chat': size, 'least-chat': c => -size(c) }[mode] || recentTime;
+        // 相同时按最近聊天排，保证结果稳定。
+        return characters.sort((a, b) => (key(b) - key(a)) || (recentTime(b) - recentTime(a)));
+    }
     function showPicker() {
         recordPageStage('打开角色搜索');
         if (!enabled) return;
@@ -862,6 +884,8 @@
         const row = element('div', 'pt-row');
         row.append(element('span', 'pt-heading', '打开对话'), button('返回', () => { pickerOpen = false; panelOpen = true; render(); }));
         const search = element('input'); search.id = 'pt-search'; search.placeholder = '搜索角色名称'; search.setAttribute('aria-label', '搜索角色名称');
+        const sort = sortSelect();
+        const bar = element('div', 'pt-search-bar'); bar.append(search, sort);
         const list = element('div'); list.id = 'pt-character-list';
         const fill = () => {
             list.replaceChildren();
@@ -869,7 +893,7 @@
             for (const session of sessions.values()) identity(session);
             const characters = ctx(host).characters.filter(c => c?.avatar && c.name?.toLocaleLowerCase().includes(filter));
             const recentTime = c => Math.max(chatTimestamp(c.date_last_chat), recentChatTimes.get(c.avatar) || 0);
-            characters.sort((a, b) => recentTime(b) - recentTime(a));
+            sortCharacters(characters, sort.value, recentTime);
             for (const c of characters.slice(0, 120)) {
                 const item = element('div', 'pt-character-choice');
                 const recent = button('', () => void openCharacter(c.avatar), c.name);
@@ -887,7 +911,8 @@
             if (characters.length > 120) list.append(element('p', 'pt-muted', '仅显示前 120 个，请继续输入名称筛选。'));
         };
         search.addEventListener('input', fill);
-        picker.append(row, search, list); fill(); render(); search.focus();
+        sort.addEventListener('change', () => { saveSortMode(sort.value); fill(); });
+        picker.append(row, bar, list); fill(); render(); search.focus();
     }
     async function showHistory(character) {
         pickerOpen = true; panelOpen = true; picker.replaceChildren();
@@ -1308,7 +1333,8 @@
             panelOpen = true; pickerOpen = false; render();
             return notify('最多保留 3 个会话。请先关闭一个已结束的子会话，再打开其他角色。');
         }
-        if ([...sessions.values()].some(s => s.id !== 'main' && !s.ready && !s.error)) return notify('有一个副窗口正在加载，请等它就绪后再添加。');
+        // 允许连续添加：新卡先占位，等前一个副窗口启动完再开始启动（避免同时启动导致内存峰值和弹窗冲突）。
+        const queued = [...sessions.values()].some(s => s.id !== 'main' && !s.ready && !s.error);
         let initialSelection = null;
         if (host.__PT_EXTENSION_CONFIG__?.rememberCharacterSettings !== false && !Object.hasOwn(host.__PT_EXTENSION_CONFIG__?.characterProfiles || {}, avatar)) {
             try { initialSelection = sessions.get(activeId)?.profile?.capture() || null; }
@@ -1318,6 +1344,7 @@
         const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, initialSelection, cleanups: [] };
         // Reserve before awaiting, so fast double clicks cannot create duplicates.
         sessions.set(id, s); panelOpen = true; pickerOpen = false; render();
+        if (queued) notify(`卡${[...sessions.keys()].indexOf(id) + 1}「${character.name}」已加入，前一个窗口启动完会自动开始加载。`);
         recordPageStage('开始打开副窗口');
         try {
             s.phase = '确认已有聊天记录';
@@ -1345,6 +1372,16 @@
             s.targetChat = chosen ? fileName(chosen) : null;
             s.existingHistory = !!chosen;
             s.expectedMessages = Number(chosen?.chat_items) || 0;
+            // 前面还有副窗口在启动时排队等待（加载失败或被关闭的不算）。
+            const booting = () => [...sessions.values()].some(o => o !== s && o.id !== 'main' && o.frame && !o.ready && !o.error);
+            if (booting()) {
+                s.phase = '排队等待前一个窗口启动'; s.status = '排队中…'; queueRender();
+                while (booting()) {
+                    await new Promise(r => host.setTimeout(r, 300));
+                    if (disposed || sessions.get(id) !== s) return;
+                }
+                s.status = '正在载入…'; queueRender();
+            }
             s.phase = '读取宿主 HTML';
             recordPageStage('读取副窗口页面');
             const html = await loadHTML();

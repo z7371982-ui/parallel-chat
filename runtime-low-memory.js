@@ -1,11 +1,11 @@
-/* 并行对话 0.7.3 — 低内存单页面后台生成（基于 0.6.8-r7）。
+/* 并行对话 0.7.4 — 低内存单页面后台生成（基于 0.6.8-r7）。
  *
  * 不再为每个会话启动第二个酒馆页面（iframe）。切换对话时，只把正在进行的
  * 生成请求留在后台继续接收；切回该对话后，由酒馆原生流程把保存下来的响应
  * 重新走一遍（正则、变量脚本、保存都是原生逻辑）。不自行拼接提示词，不直接
  * 写聊天文件，不保存 API 密钥。
  */
-const VERSION = '0.7.3';
+const VERSION = '0.7.4';
 const KEY = '__PARALLEL_TAVERN_V2__';
 const MAX_SESSIONS = 3;
 const STORE = 'parallel-tavern.jobs.v1';
@@ -1982,18 +1982,39 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         const number = Number(value), time = Number.isFinite(number) ? number : Date.parse(value);
         return Number.isFinite(time) && time > 0 ? time : 0;
     }
+    // 角色搜索的排序方式，和名称搜索叠加使用；选择记在本机。
+    const SORT_KEY = 'parallel-tavern.picker-sort';
+    const SORT_MODES = [['recent', '最近'], ['newest', '最新'], ['most-chat', '最多聊天'], ['least-chat', '最少聊天']];
+    function sortSelect() {
+        const select = element('select'); select.id = 'pt-sort'; select.setAttribute('aria-label', '角色排序方式');
+        for (const [value, label] of SORT_MODES) { const option = element('option', '', label); option.value = value; select.append(option); }
+        let saved = 'recent';
+        try { saved = host.localStorage.getItem(SORT_KEY) || saved; } catch { /* default */ }
+        select.value = SORT_MODES.some(([value]) => value === saved) ? saved : 'recent';
+        return select;
+    }
+    function saveSortMode(value) { try { host.localStorage.setItem(SORT_KEY, value); } catch { /* optional */ } }
+    function sortCharacters(characters, mode, recentTime) {
+        const added = c => chatTimestamp(c.date_added) || chatTimestamp(c.create_date);
+        const size = c => Number(c.chat_size) || 0;
+        const key = { newest: c => added(c), 'most-chat': size, 'least-chat': c => -size(c) }[mode] || recentTime;
+        // 相同时按最近聊天排，保证结果稳定。
+        return characters.sort((a, b) => (key(b) - key(a)) || (recentTime(b) - recentTime(a)));
+    }
     function showPicker() {
         pickerOpen = true; panelOpen = true;
         picker.replaceChildren();
         const row = element('div', 'pt-row');
         row.append(element('span', 'pt-heading', '打开对话'), button('返回', () => { pickerOpen = false; render(); }));
         const search = element('input'); search.id = 'pt-search'; search.placeholder = '搜索角色名称'; search.setAttribute('aria-label', '搜索角色名称');
+        const sort = sortSelect();
+        const bar = element('div', 'pt-search-bar'); bar.append(search, sort);
         const list = element('div'); list.id = 'pt-character-list';
         const fill = () => {
             list.replaceChildren();
             const filter = search.value.toLocaleLowerCase();
             const characters = ctx().characters.filter(c => c?.avatar && String(c.name || '').toLocaleLowerCase().includes(filter));
-            characters.sort((a, b) => chatTimestamp(b.date_last_chat) - chatTimestamp(a.date_last_chat));
+            sortCharacters(characters, sort.value, c => chatTimestamp(c.date_last_chat));
             for (const c of characters.slice(0, 120)) {
                 const item = element('div', 'pt-character-choice');
                 const recent = button('', () => void openSession({ avatar: c.avatar }), c.name);
@@ -2009,7 +2030,8 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             keepFloatingVisible();
         };
         search.addEventListener('input', fill);
-        picker.append(row, search, list); fill(); render();
+        sort.addEventListener('change', () => { saveSortMode(sort.value); fill(); });
+        picker.append(row, bar, list); fill(); render();
     }
     async function showHistory(character) {
         pickerOpen = true; panelOpen = true; picker.replaceChildren();

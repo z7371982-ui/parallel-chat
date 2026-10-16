@@ -9,7 +9,7 @@ const KEY = 'parallel_tavern';
 const CONTROLLER = '__PARALLEL_TAVERN_V2__';
 const nativeProxyModules = new WeakMap();
 const profileInstances = new WeakMap();
-const VERSION = '0.7.3';
+const VERSION = '0.7.4';
 
 function chooseRuntimeMode(settings) {
     if (['multi-window', 'low-memory'].includes(settings.runtimeMode)) return settings.runtimeMode;
@@ -101,17 +101,26 @@ async function initialize() {
     const root = document.createElement('div');
     root.id = 'pt-extension-settings';
     root.className = 'extension_container';
+    // 部分手机主题把 menu_button 压成最小宽度，文字会一字一行竖排；这里固定为横排、自动换行排列。
     root.innerHTML = `
+        <style>
+        #pt-extension-settings .pt-extension-actions{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+        #pt-extension-settings .pt-extension-actions .menu_button{flex:1 1 auto;width:auto!important;min-width:max-content;max-width:100%;margin:0;writing-mode:horizontal-tb;white-space:nowrap;word-break:keep-all;justify-content:center;text-align:center}
+        </style>
         <div class="inline-drawer">
             <div class="inline-drawer-toggle inline-drawer-header">
                 <b>并行对话 · ${VERSION}</b>
                 <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
             </div>
             <div class="inline-drawer-content">
-                <label for="pt-extension-mode">运行模式</label>
+                <div id="pt-extension-mode-box" style="border:2px solid var(--SmartThemeQuoteColor,#d2b5c5);border-radius:8px;padding:8px 10px;margin:6px 0;background:rgba(210,181,197,.12)">
+                <label for="pt-extension-mode" style="font-weight:bold;font-size:1.05em">⚙ 运行模式切换</label>
+                <div style="margin:4px 0">当前运行：<b>${runningMode === 'low-memory' ? '低内存 · 单页面' : '多窗口 · 独立页面'}</b></div>
                 <select id="pt-extension-mode" class="text_pole"><option value="low-memory">低内存 · 单页面</option><option value="multi-window">多窗口 · 独立页面</option></select>
+                <div id="pt-extension-mode-hint" role="status" style="display:none;margin-top:6px;padding:4px 8px;border-radius:6px;background:rgba(230,170,60,.2);font-weight:bold">⚠ 已选择新模式，点击下方「安全刷新应用模式」后生效</div>
                 <small>选择后下次刷新生效。低内存适合苹果及内存有限设备；多窗口保留独立页面。切换选择不会中断当前任务。</small>
-                <button type="button" class="menu_button" id="pt-extension-reload">安全刷新应用模式</button>
+                <div class="pt-extension-actions"><button type="button" class="menu_button" id="pt-extension-reload">安全刷新应用模式</button></div>
+                </div>
                 ${runningMode === 'low-memory' ? '<label class="checkbox_label" for="pt-extension-enabled"><input id="pt-extension-enabled" type="checkbox"><span>开启角色并行</span></label><label class="checkbox_label" for="pt-extension-background-write"><input id="pt-extension-background-write" type="checkbox"><span>后台回复直接存入聊天</span></label><label class="checkbox_label" for="pt-extension-background-progress"><input id="pt-extension-background-progress" type="checkbox"><span>生成途中定时保存进度</span></label><small>进度保存默认关闭；长聊天会增加写入开销。宿主不支持后台写入时，切回会话再处理回复。</small>' : ''}
                 <label class="checkbox_label" for="pt-extension-show-launcher">
                     <input id="pt-extension-show-launcher" type="checkbox">
@@ -123,10 +132,12 @@ async function initialize() {
                 <label class="checkbox_label" for="pt-extension-night"><input id="pt-extension-night" type="checkbox"><span>夜间模式</span></label>
                 <label class="checkbox_label" for="pt-extension-character-settings"><input id="pt-extension-character-settings" type="checkbox"><span>按角色记住预设、模型与代理</span></label>
                 <small>没有专属设置的角色使用默认配置（首次启动时的预设、模型与代理）。平时修改设置只对当前生效，不会自动记录。代理网站与密钥始终读取酒馆原生预设。</small>
+                <div class="pt-extension-actions">
                 <button type="button" class="menu_button" id="pt-extension-adopt-profile">保存为本角色设置</button>
                 <button type="button" class="menu_button" id="pt-extension-clear-profile">清除本角色设置</button>
                 <button type="button" class="menu_button" id="pt-extension-default-profile">以当前设置为默认配置</button>
-                <div><button type="button" class="menu_button" id="pt-extension-open">打开并行面板</button></div>
+                </div>
+                <div class="pt-extension-actions"><button type="button" class="menu_button" id="pt-extension-open">打开并行面板</button></div>
                 <small id="pt-extension-status" role="status"></small>
             </div>
         </div>`;
@@ -153,18 +164,15 @@ async function initialize() {
         } catch (error) { status.textContent = String(error.message || '操作失败'); }
     });
     profileAction('#pt-extension-clear-profile', p => p.clearCurrent() ? '已清除本角色设置，改用默认配置。' : '这个角色本来就没有专属设置，正在使用默认配置。');
-    profileAction('#pt-extension-default-profile', () => {
-        // 默认配置以主页面当前设置为准。
-        const main = profileInstances.get(owner);
-        if (!main) throw new Error('主页面的角色设置尚未连接，请稍后再试');
-        main.saveDefault(); return '已把当前设置存为默认配置。';
-    });
+    // 以正在看的窗口的当前设置为默认配置。
+    profileAction('#pt-extension-default-profile', p => { p.saveDefault(); return '已把当前设置存为默认配置。'; });
     const mode = root.querySelector('#pt-extension-mode');
     mode.value = settings.runtimeMode;
     mode.disabled = child;
     mode.addEventListener('change', () => {
         settings.runtimeMode = mode.value;
         persist();
+        root.querySelector('#pt-extension-mode-hint').style.display = mode.value === runningMode ? 'none' : '';
         status.textContent = '模式选择已保存。当前模式继续运行，空闲且无草稿时可刷新生效。';
     });
     const reload = root.querySelector('#pt-extension-reload');

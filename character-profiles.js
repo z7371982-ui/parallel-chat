@@ -56,13 +56,18 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
     const read = () => selection(context(), win.document);
     const signature = value => JSON.stringify(value);
     const usesProxy = () => context().mainApi === 'openai' && proxySources.has(context().chatCompletionSettings?.chat_completion_source);
-    // 角色专属设置优先；没有专属设置的角色一律使用默认配置。
-    const target = id => !enabled() || !id ? null : Object.hasOwn(settings.characterProfiles || {}, id) ? settings.characterProfiles[id] : settings.defaultProfile || null;
+    // 角色专属设置优先。默认配置只在“刚套用过专属设置、现在切到没有专属设置的角色”时
+    // 用来换回，平时绝不主动改你手动选的预设。
+    let dedicatedApplied = false, defaultCaptured = false;
+    const own = id => enabled() && id && Object.hasOwn(settings.characterProfiles || {}, id) ? settings.characterProfiles[id] : null;
+    const target = id => !enabled() || !id ? null : own(id) || (dedicatedApplied ? settings.defaultProfile || null : null);
     const hasProfile = () => !!target(avatar());
     let appReadySeen = false;
     // 第一次就绪时把当前正在用的设置记为默认配置（只在主页面，且仅当还没有默认配置）。
     const captureDefault = () => {
-        if (stopped || !enabled() || !appReadySeen || settings.defaultProfile || win !== win.top || applying || waitingPreset) return;
+        // 每次启动都以你当时正在用的设置为准，不沿用旧记录。
+        if (stopped || !enabled() || !appReadySeen || defaultCaptured || dedicatedApplied || win !== win.top || applying || waitingPreset) return;
+        defaultCaptured = true;
         const value = read();
         if (value) { settings.defaultProfile = value; save(); }
     };
@@ -185,7 +190,8 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
             restoreFailed = false;
             return;
         }
-        if (busy()) return;
+        // 生成中不切预设；结束后自动重试，避免一直卡在“正在恢复”。
+        if (busy()) { win.clearTimeout(resumeTimer); resumeTimer = win.setTimeout(() => { if (!stopped && restorePending()) activate(); }, 800); return; }
         const value = saved;
         // Old snapshots contribute their name only; no credentials are copied.
         let completed = false;
@@ -231,6 +237,7 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
             }
             restoreFailed = false;
             completed = true;
+            dedicatedApplied = !!own(id);
 
         } catch (error) {
             if (stopped || !enabled() || avatar() !== id) return;
@@ -387,7 +394,7 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
             if (!id) throw new Error('当前没有打开单角色聊天');
             if (!Object.hasOwn(settings.characterProfiles || {}, id)) return false;
             delete settings.characterProfiles[id]; save();
-            observedAvatar = null; restoreFailed = false;
+            observedAvatar = null; restoreFailed = false; dedicatedApplied = true;
             void activate();
             return true;
         },
