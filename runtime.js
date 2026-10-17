@@ -1,4 +1,4 @@
-/* Parallel Tavern 0.7.6 — Tavern Helper global script.
+/* Parallel Tavern 0.7.7 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
@@ -45,7 +45,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.7.6 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.7.7 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -116,7 +116,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.7.6';
+    const VERSION = '0.7.7';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let previousPageStage = null;
     let currentPageStage = null;
@@ -964,6 +964,12 @@
         });
     }
     // 聊天记录时间：优先 last_mes，其次文件名里的时间。
+    // 酒馆对没有聊天文件的角色返回 { error: true }。只有角色卡上的聊天大小明确为 0、
+    // 且没有最后聊天时间时才当作“没有聊天”；字段缺失时保守处理，仍视为读取失败。
+    function isEmptyHistory(data, character) {
+        return !!data && typeof data === 'object' && !!data.error
+            && Number(character?.chat_size) === 0 && !chatTimestamp(character?.date_last_chat);
+    }
     function historyTime(chat) {
         const raw = String(chat?.last_mes || '');
         // “June 5, 2024 9:00pm” 需在 am/pm 前补空格才能解析；旧版 @ 格式可能不补零。
@@ -1042,9 +1048,10 @@
             });
             if (!response.ok) throw new Error(`读取聊天记录失败（HTTP ${response.status}）`);
             const data = await response.json();
-            if (!data || data.error) throw new Error('宿主未能返回聊天记录');
+            const noChats = isEmptyHistory(data, character);
+            if (!noChats && (!data || data.error)) throw new Error('宿主未能返回聊天记录');
             if (!list.isConnected || !pickerOpen) return;
-            const chats = Object.values(data).filter(x => x && typeof x.file_name === 'string');
+            const chats = noChats ? [] : Object.values(data).filter(x => x && typeof x.file_name === 'string');
             const times = new Map(chats.map(chat => [chat, historyTime(chat)]));
             chats.sort((a, b) => times.get(b) - times.get(a));
             list.replaceChildren();
@@ -1473,9 +1480,13 @@
             if (!historyResponse.ok) throw new Error('无法确认历史聊天，已停止打开副窗口，以免误建新档。');
             const history = await historyResponse.json();
             if (disposed || sessions.get(id) !== s) return;
-            if (!history || typeof history !== 'object' || history.error) throw new Error('聊天列表返回异常，已停止打开副窗口。');
-            const chats = Object.values(history).filter(c => c && typeof c.file_name === 'string');
-            if (Object.values(history).length !== chats.length) throw new Error('无法识别聊天列表，已停止打开，未创建新档。');
+            // 角色还没有任何聊天文件时，酒馆返回 { error: true }（原生前端按空列表处理）。
+            // 用宿主统计的聊天大小和最后聊天时间核对，确实没有聊天才按新聊天打开；否则仍停止，以免误建新档。
+            const noChats = isEmptyHistory(history, character);
+            if (!noChats && (!history || typeof history !== 'object' || history.error)) throw new Error('聊天列表读取失败（该角色已有聊天记录），已停止打开副窗口，以免误建新档。请稍后重试。');
+            const entries = noChats ? [] : Object.values(history);
+            const chats = entries.filter(c => c && typeof c.file_name === 'string');
+            if (entries.length !== chats.length) throw new Error('无法识别聊天列表，已停止打开，未创建新档。');
             const fileName = c => c.file_name.replace(/\.jsonl$/i, '');
             if (targetChat && !chats.some(c => fileName(c) === targetChat)) throw new Error('指定聊天已不在历史列表中，已停止打开，未创建新档。');
             const times = new Map(chats.map(c => [c, historyTime(c)]));

@@ -1,11 +1,11 @@
-/* 并行对话 0.7.6 — 低内存单页面后台生成（基于 0.6.8-r7）。
+/* 并行对话 0.7.7 — 低内存单页面后台生成（基于 0.6.8-r7）。
  *
  * 不再为每个会话启动第二个酒馆页面（iframe）。切换对话时，只把正在进行的
  * 生成请求留在后台继续接收；切回该对话后，由酒馆原生流程把保存下来的响应
  * 重新走一遍（正则、变量脚本、保存都是原生逻辑）。不自行拼接提示词，不直接
  * 写聊天文件，不保存 API 密钥。
  */
-const VERSION = '0.7.6';
+const VERSION = '0.7.7';
 const KEY = '__PARALLEL_TAVERN_V2__';
 const MAX_SESSIONS = 3;
 const STORE = 'parallel-tavern.jobs.v1';
@@ -2184,9 +2184,11 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             });
             if (!response.ok) throw new Error(`读取聊天记录失败（HTTP ${response.status}）`);
             const data = await response.json();
-            if (!data || data.error) throw new Error('酒馆没有返回聊天记录');
+            // 角色还没有聊天文件时酒馆返回 { error: true }；聊天大小明确为 0 时按空列表显示。
+            const noChats = !!data?.error && Number(character.chat_size) === 0 && !chatTimestamp(character.date_last_chat);
+            if (!noChats && (!data || data.error)) throw new Error('酒馆没有返回聊天记录');
             if (!list.isConnected || !pickerOpen) return;
-            const chats = Object.values(data).filter(x => x && typeof x.file_name === 'string');
+            const chats = noChats ? [] : Object.values(data).filter(x => x && typeof x.file_name === 'string');
             const times = new Map(chats.map(chat => [chat, historyTime(chat)]));
             chats.sort((a, b) => (times.get(b) - times.get(a)) || b.file_name.localeCompare(a.file_name));
             list.replaceChildren();
