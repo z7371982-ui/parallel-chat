@@ -1,11 +1,16 @@
-/* Parallel Tavern 0.7.4 — Tavern Helper global script.
+/* Parallel Tavern 0.7.6 — Tavern Helper global script.
  * No external dependencies, new API keys, custom generation or chat-file writes.
  * Each mounted same-origin document keeps its own native SillyTavern pipeline.
  */
 (function parallelTavernBootstrap() {
     'use strict';
     const KEY = '__PARALLEL_TAVERN_V2__';
-    try { if (window.__PT_CHILD_ID__ || window.parent.__PT_CHILD_ID__) return; } catch {}
+    // 副窗口（含被重载后丢失引导脚本的副窗口）内不得再作为宿主启动。
+    const ptChildPage = w => {
+        try { return !!w.__PT_CHILD_ID__ || (w !== w.top && (!!w.frameElement?.classList?.contains('pt-frame') || !!w.parent.__PARALLEL_TAVERN_V2__)); }
+        catch { return false; }
+    };
+    try { if (window.__PT_CHILD_ID__ || window.parent.__PT_CHILD_ID__ || window.frameElement?.classList?.contains('pt-frame') || window.parent.frameElement?.classList?.contains('pt-frame')) return; } catch {}
     const startupTiming = { scriptStartedAt: Date.now(), hostPageAgeAtStartMs: null, hostFoundMs: null, launcherReadyMs: null };
     let pendingEntry;
     const owner = `helper-${Date.now()}-${Math.random()}`;
@@ -15,8 +20,9 @@
     function resolveHost() {
         let candidate = window;
         while (true) {
-            if (candidate.__PT_CHILD_ID__) return null;
+            if (candidate.__PT_CHILD_ID__) { stopped = true; return null; }
             if (candidate.document.getElementById('send_textarea')) {
+                if (ptChildPage(candidate)) { stopped = true; return null; }
                 startupTiming.hostFoundMs ??= Date.now() - startupTiming.scriptStartedAt;
                 startupTiming.hostPageAgeAtStartMs ??= Math.round(startupTiming.scriptStartedAt - candidate.performance.timeOrigin);
                 if (!candidate.SillyTavern?.getContext) {
@@ -39,7 +45,7 @@
         console.error('[Parallel Tavern startup]', error);
         let target = host;
         try { target ||= window.parent; } catch { target = window; }
-        const message = `并行对话 v0.7.4 启动失败：${String(error?.message || error).slice(0, 350)}`;
+        const message = `并行对话 v0.7.6 启动失败：${String(error?.message || error).slice(0, 350)}`;
         try {
             const d = target.document;
             d.getElementById('pt-startup-error')?.remove();
@@ -96,7 +102,7 @@
     let attempts = 0;
     if (!start()) {
         retry = window.setInterval(() => {
-            if (start() || ++attempts >= 120) {
+            if (stopped || start() || ++attempts >= 120) {
                 window.clearInterval(retry);
                 if (!host && !stopped && attempts >= 120) report('等待主聊天页面超时。请打开角色后点击“并行对话”。');
             }
@@ -110,7 +116,7 @@
     function install(host) {
     const doc = host.document;
     let launcherVisible = host.__PT_EXTENSION_CONFIG__?.showLauncher !== false;
-    const VERSION = '0.7.4';
+    const VERSION = '0.7.6';
     const iosBrowser = /iPhone|iPad|iPod/.test(host.navigator.userAgent) || (host.navigator.platform === 'MacIntel' && host.navigator.maxTouchPoints > 1);
     let previousPageStage = null;
     let currentPageStage = null;
@@ -358,6 +364,23 @@
     picker.setAttribute('aria-label', '选择并行角色'); picker.dataset.ttMobileSurface = 'free-window';
     const toast = element('div'); toast.id = 'pt-toast'; toast.hidden = true; toast.setAttribute('role', 'status');
     style.textContent += "\n#pt-panel[data-night=\"true\"],#pt-launcher[data-night=\"true\"],#pt-toast[data-night=\"true\"]{color-scheme:dark;background:#242126;border-color:#494149;color:#eee7eb;box-shadow:0 12px 40px #0005;scrollbar-color:#655762 transparent}\n#pt-panel[data-night=\"true\"] .pt-heading,#pt-panel[data-night=\"true\"] .pt-title{color:#f2e9ee}\n#pt-panel[data-night=\"true\"] .pt-button{background:#3b333b;color:#ede1e7}\n#pt-panel[data-night=\"true\"] .pt-button:hover{background:#51434f;color:#fff}\n#pt-panel[data-night=\"true\"] .pt-add,#pt-panel[data-night=\"true\"] .pt-welcome .pt-button{background:#d2b5c5;color:#281f26}\n#pt-panel[data-night=\"true\"] .pt-card.pt-active,#pt-panel[data-night=\"true\"] .pt-menu{background:#302a31}\n#pt-panel[data-night=\"true\"] .pt-session-open,#pt-panel[data-night=\"true\"] .pt-icon-button,#pt-panel[data-night=\"true\"] #pt-character-list .pt-button{background:transparent}\n#pt-panel[data-night=\"true\"] .pt-session-open:hover{background:#433743}\n#pt-panel[data-night=\"true\"] .pt-footer{background:#242126;border-color:#494149;color:#c2b2bc}\n#pt-panel[data-night=\"true\"] .pt-section-label,#pt-panel[data-night=\"true\"] .pt-character-choice{border-color:#494149;color:#bfb0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-subheading,.pt-overview,.pt-current,.pt-preview,.pt-status,.pt-muted,.pt-chat-name),#pt-launcher[data-night=\"true\"] .pt-dock-note{color:#c2b0bb}\n#pt-panel[data-night=\"true\"] :is(.pt-completed,.pt-ready-count),#pt-panel[data-night=\"true\"] .pt-card[data-unread=\"true\"] .pt-status{color:#edb1a4}\n#pt-panel[data-night=\"true\"] .pt-card[data-busy=\"true\"] .pt-status{color:#d2acd1}\n#pt-panel[data-night=\"true\"] .pt-error{color:#ffb3b3}\n#pt-panel[data-night=\"true\"] .pt-portrait,#pt-launcher[data-night=\"true\"] .pt-portrait{background:#51424c;color:#efcadc;border-color:#242126}\n#pt-panel[data-night=\"true\"] #pt-search,#pt-panel[data-night=\"true\"] #pt-sort,#pt-panel[data-night=\"true\"] #pt-diagnostic-text{background:#302a31!important;color:#ede1e7!important;border-color:#675561!important;color-scheme:dark}\n#pt-panel[data-night=\"true\"] #pt-search::placeholder{color:#bcaab5}\n#pt-panel[data-night=\"true\"] #pt-history-list .pt-button{background:#38303a;color:#eee4eb}\n#pt-panel[data-night=\"true\"] #pt-character-list .pt-character-choice>.pt-button:last-child{background:#493843;border-color:#806372;color:#f3dce7}\n#pt-panel[data-night=\"true\"] .pt-footer .pt-button{color:#d0bec9}\n\n";
+    style.textContent += `
+#pt-panel[data-night="true"] .pt-card:nth-child(even) .pt-portrait{background:#484152;color:#ddcdee}
+#pt-panel[data-night="true"] .pt-footer .pt-button,#pt-panel[data-night="true"] .pt-footer .pt-button:hover{background:transparent}
+#pt-panel[data-night="true"] .pt-footer .pt-button:hover{color:#fff}
+#pt-panel[data-night="true"] #pt-character-list .pt-character-choice>.pt-button:last-child:hover{background:#5a4553;border-color:#9a7788;color:#fff}
+#pt-panel[data-night="true"] #pt-character-list .pt-character-choice>.pt-button:last-child:active{background:#664e5d}
+#pt-panel .pt-card[data-error="true"] .pt-status{color:#a45758}
+#pt-panel[data-night="true"] .pt-card[data-error="true"] .pt-status{color:#ffb3b3}
+#pt-launcher .pt-portrait[data-unread="true"]{z-index:1;box-shadow:0 0 0 2px #c28880}
+#pt-launcher[data-night="true"] .pt-portrait[data-unread="true"]{box-shadow:0 0 0 2px #ba7e94}
+#pt-launcher[data-dock="left"]::before,#pt-launcher[data-dock="right"]::before{content:'';position:absolute;top:-8px;bottom:-8px;width:36px;background:transparent}
+#pt-launcher[data-dock="left"]::before{left:-1px}
+#pt-launcher[data-dock="right"]::before{right:-1px}
+#pt-panel .pt-footer .pt-button{min-height:44px}
+#pt-panel .pt-menu summary{min-height:44px;padding:10px 0;box-sizing:border-box}
+@media (pointer:coarse){#pt-panel #pt-search,#pt-panel #pt-sort{font-size:16px}}
+    `;
     doc.body.append(shell, launcher, panel, toast, completionBadge);
     const safeArea = element('div');
     safeArea.dataset.ttMobileSurface = 'none';
@@ -388,8 +411,9 @@
             badge.hidden = !face;
             if (!face) continue;
             const r = face.getBoundingClientRect();
-            badge.style.setProperty('left', `${Math.max(left + 2, Math.min(left + width - 18, r.right - 8))}px`, 'important');
-            badge.style.setProperty('top', `${Math.max(top + 2, Math.min(top + height - 18, r.top - 5))}px`, 'important');
+            // 角标放在自己头像的正上方居中，避免因头像重叠被误认为属于下一个头像。
+            badge.style.setProperty('left', `${Math.max(left + 2, Math.min(left + width - 18, r.left + r.width / 2 - 8))}px`, 'important');
+            badge.style.setProperty('top', `${Math.max(top + 2, Math.min(top + height - 18, r.top - 10))}px`, 'important');
         }
     }
     // TT can give generic floating containers a zero/auto height. Do not resolve
@@ -416,13 +440,11 @@
     }
     host.addEventListener('resize', layoutSessions);
     host.visualViewport?.addEventListener('resize', layoutSessions);
-    host.visualViewport?.addEventListener('scroll', layoutSessions);
     const sessionSizer = typeof host.ResizeObserver === 'function' ? new host.ResizeObserver(layoutSessions) : null;
     sessionSizer?.observe(shell);
     teardown.push(() => {
         sessionSizer?.disconnect(); host.removeEventListener('resize', layoutSessions);
         host.visualViewport?.removeEventListener('resize', layoutSessions);
-        host.visualViewport?.removeEventListener('scroll', layoutSessions);
     });
     layoutSessions();
     function setFloating(node, visible) {
@@ -565,20 +587,26 @@
         }
         positionCompletionBadge();
     }
-    let floatingLayoutFrame = 0;
+    let floatingLayoutFrame = 0, viewportLayoutPending = false;
     const requestFloatingLayout = () => {
         if (disposed || floatingLayoutFrame) return;
-        floatingLayoutFrame = host.requestAnimationFrame(() => { floatingLayoutFrame = 0; keepFloatingVisible(); });
+        floatingLayoutFrame = host.requestAnimationFrame(() => {
+            floatingLayoutFrame = 0;
+            if (viewportLayoutPending) { viewportLayoutPending = false; layoutSessions(); }
+            keepFloatingVisible();
+        });
     };
+    // 视口滚动事件很密集：合并到下一帧再布局。
+    const viewportScrolled = () => { viewportLayoutPending = true; requestFloatingLayout(); };
     // Dock/undock changes dimensions. Defer observer-driven writes to the next
     // frame instead of changing observed sizes during WebKit's notification pass.
     const floatObserver = typeof host.ResizeObserver === 'function' ? new host.ResizeObserver(requestFloatingLayout) : null;
     floatObserver?.observe(panel); floatObserver?.observe(launcher); floatObserver?.observe(toast);
     host.addEventListener('resize', keepFloatingVisible);
     host.visualViewport?.addEventListener('resize', keepFloatingVisible);
-    host.visualViewport?.addEventListener('scroll', keepFloatingVisible);
+    host.visualViewport?.addEventListener('scroll', viewportScrolled);
     teardown.push(() => { floatObserver?.disconnect(); host.cancelAnimationFrame(floatingLayoutFrame); host.removeEventListener('resize', keepFloatingVisible);
-        host.visualViewport?.removeEventListener('resize', keepFloatingVisible); host.visualViewport?.removeEventListener('scroll', keepFloatingVisible); });
+        host.visualViewport?.removeEventListener('resize', keepFloatingVisible); host.visualViewport?.removeEventListener('scroll', viewportScrolled); });
     const notify = message => {
         toast.textContent = message; toast.hidden = false; setFloating(toast, true);
         host.clearTimeout(toastTimer); toastTimer = host.setTimeout(() => { toast.hidden = true; setFloating(toast, false); }, 6500);
@@ -711,30 +739,79 @@
         // Do not move or remove frames: doing so can tear down their browsing context.
     }
     panel.addEventListener('cancel', e => { e.preventDefault(); panelOpen = false; pickerOpen = false; render(); });
+    // popover=manual 不会触发 cancel：Esc 由这里关闭面板/选择器并把焦点还给悬浮入口。
+    panel.addEventListener('keydown', e => {
+        if (e.key !== 'Escape' || e.isComposing || (!panelOpen && !pickerOpen)) return;
+        e.preventDefault(); e.stopPropagation();
+        panelOpen = false; pickerOpen = false; render();
+        try { launcher.focus({ preventScroll: true }); } catch {}
+    });
+    // 标题未读数：只管理自己加的 "(n) " 前缀，宿主改标题后重新补上。
+    let badgeSignature = '';
+    const titlePrefix = /^\(\d+\) /;
+    let titledUnread = 0;
+    function updateUnreadTitle(count) {
+        const n = host.__PT_EXTENSION_CONFIG__?.completionAlert !== false && !disposed ? count : 0;
+        try {
+            const base = doc.title.replace(titlePrefix, '');
+            const next = n > 0 ? `(${n}) ${base}` : (titledUnread > 0 ? base : doc.title);
+            if (doc.title !== next) doc.title = next;
+            titledUnread = n;
+        } catch {}
+    }
+    teardown.push(() => updateUnreadTitle(0));
+    // 后台会话完成时的额外提醒：振动、系统通知。当前可见会话且页面可见时不打扰。
+    function completionAlert(session) {
+        const config = host.__PT_EXTENSION_CONFIG__ || {};
+        if (config.completionAlert === false || disposed) return;
+        let hidden = false;
+        try { hidden = doc.hidden === true; } catch {}
+        if (activeId === session.id && !hidden) return;
+        try { host.navigator.vibrate?.([120, 60, 120]); } catch {}
+        if (config.completionNotify !== true || !hidden) return;
+        try {
+            if (host.Notification?.permission !== 'granted') return;
+            let icon;
+            try { icon = (session.avatar && ctx(host).getThumbnailUrl?.('avatar', session.avatar)) || undefined; } catch {}
+            const note = new host.Notification('并行对话', { body: `${session.title} 的回复已完成`, tag: 'pt-' + session.id, ...(icon ? { icon } : {}) });
+            note.onclick = () => {
+                try { host.focus(); } catch {}
+                try { if (!disposed && sessions.get(session.id) === session) setActive(session.id); } catch {}
+                try { note.close(); } catch {}
+            };
+        } catch {}
+    }
     function updateLauncher() {
         const all = [...sessions.values()];
         const running = all.filter(isGenerating).length;
         const completed = enabled ? all.filter(s => s.unreadCompletion) : [];
         launcher.dataset.signal = running ? 'generating' : completed.length ? 'completed' : 'idle';
         launcher.dataset.completed = String(completed.length);
-        const signature = JSON.stringify([enabled, running, completed.length, all.map(s => [s.title, s.avatar])]);
+        const signature = JSON.stringify([enabled, running, completed.length, all.map(s => [s.title, s.avatar, enabled && !!s.unreadCompletion])]);
         if (signature !== launcherSignature) {
             launcherSignature = signature;
             const dock = element('span', 'pt-dock'), faces = element('span', 'pt-dock-faces');
             for (const s of (enabled ? all : [main])) {
-                const face = portrait(s); face.dataset.ptSession = s.id; faces.append(face);
+                const face = portrait(s); face.dataset.ptSession = s.id;
+                if (enabled && s.unreadCompletion) face.dataset.unread = 'true';
+                faces.append(face);
             }
             const label = element('span', 'pt-dock-label', completed.length ? `${completed.length} 个已完成` : '并行会话');
             label.append(element('span', 'pt-dock-note', enabled ? (running ? `${running} 个正在回复` : '点开查看会话') : '点击开启'));
             dock.append(faces, label);
             launcher.replaceChildren(dock);
         }
-        // 角标显示卡位序号（与面板顺序一致），而不是固定的“1”。
-        completionBadge.replaceChildren(...completed.map(session => {
-            const badge = element('span', 'pt-avatar-badge', String(all.indexOf(session) + 1));
-            badge.dataset.ptSession = session.id;
-            return badge;
-        }));
+        // 角标显示卡位序号（与面板顺序一致），而不是固定的“1”。内容不变时不重建。
+        const badgeKey = JSON.stringify(completed.map(session => [session.id, all.indexOf(session) + 1]));
+        if (badgeKey !== badgeSignature) {
+            badgeSignature = badgeKey;
+            completionBadge.replaceChildren(...completed.map(session => {
+                const badge = element('span', 'pt-avatar-badge', String(all.indexOf(session) + 1));
+                badge.dataset.ptSession = session.id;
+                return badge;
+            }));
+        }
+        updateUnreadTitle(completed.length);
         completionBadge.hidden = completed.length === 0 || !!dockSide;
         setFloating(completionBadge, !completionBadge.hidden); positionCompletionBadge();
         const stateLabel = running ? `${running} 个正在回复${completed.length ? `，${completed.length} 个已完成待查看` : ''}` : completed.length ? `${completed.length} 个已生成完成，待查看` : '空闲';
@@ -794,6 +871,7 @@
             const card = element('div', `pt-card${activeId === session.id ? ' pt-active' : ''}`);
             card.dataset.session = session.id;
             card.dataset.busy = String(isGenerating(session)); card.dataset.unread = String(!!session.unreadCompletion);
+            card.dataset.error = String(!!session.error);
             const sessionRow = element('div', 'pt-session-row');
             const open = button('', () => setActive(session.id), '查看此会话'); open.classList.add('pt-session-open');
             const copy = element('span', 'pt-session-copy');
@@ -812,6 +890,9 @@
                 if (saveProtection(session)?.writeFailed) {
                     const retry = button('重试原生保存', () => void retrySessionSave(session));
                     retry.disabled = !!session.retryingSave; controls.append(retry);
+                }
+                if (session.id === 'main' && session.writeProtection?.writeFailed && !session.writeProtection.pendingWrites) {
+                    controls.append(button('我已确认保存，解除保护', releaseMainProtection));
                 }
                 if (session.id !== 'main') {
                     const close = button('关闭窗口', () => closeSession(session));
@@ -851,7 +932,7 @@
             const status = card.querySelector('.pt-status');
             const next = `${session.id === 'main' ? '主页面 · ' : ''}${activityLabel(session)}`;
             if (status && status.textContent !== next) status.textContent = next;
-            card.dataset.busy = String(isGenerating(session));
+            card.dataset.busy = String(isGenerating(session)); card.dataset.error = String(!!session.error);
             const snippet = card.querySelector('.pt-preview'), text = preview(session).replace(/\s+/g, ' ') || '点击进入对话';
             if (snippet && snippet.textContent !== text) snippet.textContent = text;
         }
@@ -859,7 +940,7 @@
     }
     // 角色搜索的排序方式，和名称搜索叠加使用；选择记在本机。
     const SORT_KEY = 'parallel-tavern.picker-sort';
-    const SORT_MODES = [['recent', '最近'], ['newest', '最新'], ['most-chat', '最多聊天'], ['least-chat', '最少聊天']];
+    const SORT_MODES = [['recent', '最近'], ['newest', '最新'], ['fav', '收藏'], ['most-chat', '最多聊天'], ['least-chat', '最少聊天']];
     function sortSelect() {
         const select = element('select'); select.id = 'pt-sort'; select.setAttribute('aria-label', '角色排序方式');
         for (const [value, label] of SORT_MODES) { const option = element('option', '', label); option.value = value; select.append(option); }
@@ -872,22 +953,48 @@
     function sortCharacters(characters, mode, recentTime) {
         const added = c => chatTimestamp(c.date_added) || chatTimestamp(c.create_date);
         const size = c => Number(c.chat_size) || 0;
-        const key = { newest: c => added(c), 'most-chat': size, 'least-chat': c => -size(c) }[mode] || recentTime;
+        const fav = c => c.fav === true || c.fav === 'true' ? 1 : 0;
+        const key = { newest: c => added(c), fav, 'most-chat': size, 'least-chat': c => -size(c) }[mode] || recentTime;
+        // 每次填充只计算一次排序键，比较时不再重复解析日期。
+        const keys = new Map(characters.map(c => [c, [key(c), recentTime(c)]]));
         // 相同时按最近聊天排，保证结果稳定。
-        return characters.sort((a, b) => (key(b) - key(a)) || (recentTime(b) - recentTime(a)));
+        return characters.sort((a, b) => {
+            const x = keys.get(a), y = keys.get(b);
+            return (y[0] - x[0]) || (y[1] - x[1]);
+        });
     }
-    function showPicker() {
+    // 聊天记录时间：优先 last_mes，其次文件名里的时间。
+    function historyTime(chat) {
+        const raw = String(chat?.last_mes || '');
+        // “June 5, 2024 9:00pm” 需在 am/pm 前补空格才能解析；旧版 @ 格式可能不补零。
+        const human = chatTimestamp(raw.replace(/(\d)\s*([ap])\.?m\.?$/i, '$1 $2m'));
+        if (human) return human;
+        const pattern = /(\d{4})-(\d{1,2})-(\d{1,2})@(\d{1,2})h(\d{1,2})m(\d{1,2})s/;
+        const match = raw.match(pattern) || String(chat?.file_name || '').match(pattern);
+        if (!match) return 0;
+        const p = match.slice(1).map(v => v.padStart(2, '0'));
+        return Date.parse(`${p[0]}-${p[1]}-${p[2]}T${p[3]}:${p[4]}:${p[5]}`) || 0;
+    }
+    // 从“其他对话”返回时恢复搜索词、排序和滚动位置。
+    let pickerState = null;
+    let searchTimer = 0;
+    teardown.push(() => host.clearTimeout(searchTimer));
+    function showPicker(restore) {
         recordPageStage('打开角色搜索');
         if (!enabled) return;
+        const saved = restore === true ? pickerState : null;
+        pickerState = null;
         pickerOpen = true; panelOpen = true;
         picker.replaceChildren();
         const row = element('div', 'pt-row');
         row.append(element('span', 'pt-heading', '打开对话'), button('返回', () => { pickerOpen = false; panelOpen = true; render(); }));
         const search = element('input'); search.id = 'pt-search'; search.placeholder = '搜索角色名称'; search.setAttribute('aria-label', '搜索角色名称');
         const sort = sortSelect();
+        if (saved) { search.value = saved.search; if (SORT_MODES.some(([value]) => value === saved.sort)) sort.value = saved.sort; }
         const bar = element('div', 'pt-search-bar'); bar.append(search, sort);
         const list = element('div'); list.id = 'pt-character-list';
         const fill = () => {
+            host.clearTimeout(searchTimer);
             list.replaceChildren();
             const filter = search.value.toLocaleLowerCase();
             for (const session of sessions.values()) identity(session);
@@ -903,21 +1010,29 @@
                 const copy = element('span', 'pt-character-copy', c.name);
                 copy.append(element('span', 'pt-muted', '最近聊天'));
                 recent.append(face, copy);
-                const history = button('其他对话', () => void showHistory(c), `${c.name}的其他对话`);
+                const history = button('其他对话', () => {
+                    pickerState = { search: search.value, sort: sort.value, scroll: panel.scrollTop };
+                    void showHistory(c);
+                }, `${c.name}的其他对话`);
                 const arrow = element('span', 'pt-history-arrow', '→'); arrow.setAttribute('aria-hidden', 'true'); history.append(arrow);
                 item.append(recent, history); list.append(item);
             }
             if (!characters.length) list.append(element('p', 'pt-muted', '没有匹配角色'));
             if (characters.length > 120) list.append(element('p', 'pt-muted', '仅显示前 120 个，请继续输入名称筛选。'));
         };
-        search.addEventListener('input', fill);
+        search.addEventListener('input', () => { host.clearTimeout(searchTimer); searchTimer = host.setTimeout(fill, 150); });
         sort.addEventListener('change', () => { saveSortMode(sort.value); fill(); });
-        picker.append(row, bar, list); fill(); render(); search.focus();
+        picker.append(row, bar, list); fill(); render();
+        // 触屏上自动聚焦会弹出键盘，只在精确指针设备上聚焦。
+        let finePointer = false;
+        try { finePointer = host.matchMedia('(pointer:fine)').matches; } catch {}
+        if (finePointer && !saved) { try { search.focus({ preventScroll: true }); } catch {} }
+        if (saved) panel.scrollTop = saved.scroll || 0;
     }
     async function showHistory(character) {
         pickerOpen = true; panelOpen = true; picker.replaceChildren();
         const row = element('div', 'pt-row');
-        row.append(element('span', 'pt-heading', character.name), button('返回', showPicker));
+        row.append(element('span', 'pt-heading', character.name), button('返回', () => showPicker(true)));
         const list = element('div', 'pt-history-list');
         list.id = 'pt-history-list';
         list.append(element('p', 'pt-muted', '正在读取聊天记录…')); picker.append(row, list); render();
@@ -930,7 +1045,8 @@
             if (!data || data.error) throw new Error('宿主未能返回聊天记录');
             if (!list.isConnected || !pickerOpen) return;
             const chats = Object.values(data).filter(x => x && typeof x.file_name === 'string');
-            chats.sort((a, b) => String(b.last_mes || b.file_name).localeCompare(String(a.last_mes || a.file_name)));
+            const times = new Map(chats.map(chat => [chat, historyTime(chat)]));
+            chats.sort((a, b) => times.get(b) - times.get(a));
             list.replaceChildren();
             for (const chat of chats) {
                 const name = chat.file_name.replace(/\.jsonl$/i, '');
@@ -955,15 +1071,17 @@
     }
     function attachSession(session) {
         if (host.__PT_INSTALL_CHARACTER_PROFILES__ && !session.profile) {
-            session.profile = host.__PT_INSTALL_CHARACTER_PROFILES__(session.win, { busy: () => isBusy(session), notify, initialSelection: session.initialSelection });
-            session.initialSelection = null;
+            session.profile = host.__PT_INSTALL_CHARACTER_PROFILES__(session.win, { busy: () => isBusy(session), notify });
             session.cleanups.push(() => session.profile.dispose());
         }
         if (host.__PT_INSTALL_SCROLL_QR_COMPAT__) session.cleanups.push(host.__PT_INSTALL_SCROLL_QR_COMPAT__(session.win, () => sessions.get(activeId)?.win || host));
         const w = session.win, c = ctx(w), events = c.eventTypes || c.event_types;
         if (w !== host) session.cleanups.push(bindAudioGesture(w));
-        on(c.eventSource, events.GENERATION_STARTED, (_type, _options, dryRun) => {
+        on(c.eventSource, events.GENERATION_STARTED, (type, _options, dryRun) => {
             if (dryRun) return;
+            // 后台总结等 quiet 生成不算回复：不提示、不标记完成。
+            // 不置 busy，于是其结束事件里 wasBusy 为假，不会响铃或标记完成。
+            if (type === 'quiet') return;
             session.generationSeen = true;
             session.unreadCompletion = false;
             session.busy = true; session.status = '生成中'; session.error = null; queueRender();
@@ -972,9 +1090,14 @@
             const wasBusy = session.busy; session.busy = false; session.status = '生成已结束';
             if (wasBusy && enabled) completionSound();
             if (wasBusy && enabled && activeId !== session.id) session.unreadCompletion = true;
+            if (wasBusy && enabled) completionAlert(session);
             queueRender();
             if (wasBusy && enabled && activeId !== session.id) notify(`卡${[...sessions.keys()].indexOf(session.id) + 1}「${session.title}」的回复已完成，可以切回查看。`);
         }, session);
+        // 宿主的 date_last_chat 不一定及时更新：收发消息时记下本机时间供“最近”排序。
+        const touchRecent = () => { identity(session); const avatar = session.avatar || session.targetAvatar; if (avatar) recentChatTimes.set(avatar, Date.now()); };
+        on(c.eventSource, events.MESSAGE_SENT, touchRecent, session);
+        on(c.eventSource, events.MESSAGE_RECEIVED, touchRecent, session);
         on(c.eventSource, events.GENERATION_STOPPED, () => {
             // Native core can still be saving after STOPPED; isBusy also reads it.
             session.busy = false; session.status = '已停止'; queueRender();
@@ -1335,13 +1458,8 @@
         }
         // 允许连续添加：新卡先占位，等前一个副窗口启动完再开始启动（避免同时启动导致内存峰值和弹窗冲突）。
         const queued = [...sessions.values()].some(s => s.id !== 'main' && !s.ready && !s.error);
-        let initialSelection = null;
-        if (host.__PT_EXTENSION_CONFIG__?.rememberCharacterSettings !== false && !Object.hasOwn(host.__PT_EXTENSION_CONFIG__?.characterProfiles || {}, avatar)) {
-            try { initialSelection = sessions.get(activeId)?.profile?.capture() || null; }
-            catch (error) { return notify(shortError(error)); }
-        }
         const id = `session-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-        const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, initialSelection, cleanups: [] };
+        const s = { id, win: null, frame: null, ready: false, busy: false, status: '正在载入…', title: character.name, avatar: null, targetAvatar: avatar, targetChat, cleanups: [] };
         // Reserve before awaiting, so fast double clicks cannot create duplicates.
         sessions.set(id, s); panelOpen = true; pickerOpen = false; render();
         if (queued) notify(`卡${[...sessions.keys()].indexOf(id) + 1}「${character.name}」已加入，前一个窗口启动完会自动开始加载。`);
@@ -1360,15 +1478,12 @@
             if (Object.values(history).length !== chats.length) throw new Error('无法识别聊天列表，已停止打开，未创建新档。');
             const fileName = c => c.file_name.replace(/\.jsonl$/i, '');
             if (targetChat && !chats.some(c => fileName(c) === targetChat)) throw new Error('指定聊天已不在历史列表中，已停止打开，未创建新档。');
-            const historyTime = chat => {
-                const raw = String(chat.last_mes || '');
-                const match = raw.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/)
-                    || chat.file_name.match(/(\d{4}-\d{2}-\d{2})@(\d{2})h(\d{2})m(\d{2})s/);
-                return chatTimestamp(chat.last_mes) || (match ? Date.parse(`${match[1]}T${match[2]}:${match[3]}:${match[4]}`) : 0) || 0;
-            };
-            const latest = [...chats].sort((a, b) => historyTime(b) - historyTime(a));
+            const times = new Map(chats.map(c => [c, historyTime(c)]));
+            const latest = [...chats].sort((a, b) => times.get(b) - times.get(a));
+            // “最近聊天”优先用宿主记录的当前聊天（文件名只是创建时间），找不到再按时间。
+            const preferred = String(character.chat || '').replace(/\.jsonl$/i, '');
             const chosen = targetChat ? chats.find(c => fileName(c) === targetChat)
-                : latest[0];
+                : (preferred && chats.find(c => fileName(c) === preferred)) || latest[0];
             s.targetChat = chosen ? fileName(chosen) : null;
             s.existingHistory = !!chosen;
             s.expectedMessages = Number(chosen?.chat_items) || 0;
@@ -1424,8 +1539,24 @@
             doc.head.append(writer); writer.remove();
             recordPageStage('副窗口页面已写入');
             if (frame.dataset.ptBootWritten !== 'yes') throw new Error('宿主阻止了子会话启动脚本。并行面板可用，但此环境暂不能打开并行会话。');
+            // 副窗口自行重载后是没有引导脚本保护的原生页面：标记失败并释放。
+            // iframe 的 WindowProxy 跨导航保持不变，因此以引导标记判断，而非比较 contentWindow。
+            const reloaded = () => {
+                if (disposed || sessions.get(id) !== s || s.released) return;
+                let marked = false;
+                try { marked = frame.contentWindow?.__PT_CHILD_ID__ === id && (!s.win || frame.contentWindow === s.win); } catch {}
+                if (!marked) markReloaded(s);
+            };
+            frame.addEventListener('load', reloaded);
+            s.cleanups.push(() => frame.removeEventListener('load', reloaded));
+            // 更早的信号：旧文档 pagehide 时新页面尚未执行脚本，立即释放可阻止原生页面启动。
+            // 关闭/释放/卸载时 frame 已断开或已标记，不会误判。
+            const childWin = frame.contentWindow;
+            const leaving = () => host.setTimeout(() => { if (frame.isConnected) reloaded(); }, 0);
+            try { childWin.addEventListener('pagehide', leaving); } catch {}
+            s.cleanups.push(() => { try { childWin.removeEventListener('pagehide', leaving); } catch {} });
             const watch = host.setInterval(() => {
-                if (s.ready || !sessions.has(id) || disposed) { host.clearInterval(watch); return; }
+                if (s.ready || s.released || !sessions.has(id) || disposed) { host.clearInterval(watch); return; }
                 try { attachChild(frame.contentWindow, id); revealStartupPopup(s); } catch {}
             }, 250);
             s.cleanups.push(() => host.clearInterval(watch));
@@ -1433,16 +1564,46 @@
         } catch (error) {
             if (disposed || sessions.get(id) !== s) return;
             recordPageStage('副窗口加载失败');
-            s.status = '加载失败'; s.error = shortError(error); queueRender(); notify(s.error);
+            failSession(s, shortError(error));
         }
     }
 
+    // 失败的副窗口：卡片保留（显示错误，可关闭），释放 iframe 腾出名额和内存，不再视为可写。
+    // 仍有未保存/保存中的写入时保留窗口，以免丢失回复。
+    function failSession(s, message, status = '加载失败') {
+        if (disposed || sessions.get(s.id) !== s) return;
+        host.clearTimeout(s.timeout);
+        s.ready = false; s.opening = false; s.needsConfirmation = false; s.lastStartupPopup = null; s.busy = false;
+        s.status = status; s.error = message;
+        const protection = saveProtection(s);
+        if (s.frame && !(protection?.writeFailed || protection?.pendingWrites > 0)) {
+            s.released = true;
+            // 延后移除：失败可能在子页面自己的调用栈里上报。
+            host.setTimeout(() => releaseFrame(s), 0);
+        }
+        if (activeId === s.id) setActive('main');
+        queueRender(); notify(message);
+    }
+    function releaseFrame(s) {
+        for (const clean of s.cleanups.splice(0)) { try { clean(); } catch {} }
+        const frame = s.frame; s.frame = null; s.win = null;
+        if (frame) { sessionSizer?.unobserve(frame); frame.remove(); }
+        if (!disposed) queueRender();
+    }
+    function markReloaded(s) {
+        s.phase = '副窗口被重载';
+        failSession(s, '窗口已重载，请关闭后重新打开', '窗口已重载');
+    }
     function armLoadWarning(s) {
         host.clearTimeout(s.timeout);
+        const pending = () => !disposed && sessions.get(s.id) === s && !s.ready && !s.error && !s.needsConfirmation;
         s.timeout = host.setTimeout(() => {
-            if (!s.ready && !s.error && !s.needsConfirmation) {
-                s.status = '加载较慢，仍在等待'; queueRender();
-            }
+            if (!pending()) return;
+            s.status = '加载较慢，仍在等待'; queueRender();
+            // 超过 120 秒仍未就绪：判定失败并释放窗口，让排队的卡继续加载。
+            s.timeout = host.setTimeout(() => {
+                if (pending()) { s.phase = '加载超时'; failSession(s, '加载超时（超过 120 秒），已释放此窗口。请关闭此卡后重新打开。', '加载超时'); }
+            }, 60000);
         }, 60000);
     }
     function revealStartupPopup(s) {
@@ -1529,7 +1690,7 @@
                         if (activeId === id) setActive(id);
                         else { queueRender(); notify(`卡${[...sessions.keys()].indexOf(id) + 1}「${s.title}」已就绪，点卡片即可切换。`); }
                         recordPageStage('副窗口就绪');
-                    } catch (error) { if (disposed || sessions.get(id) !== s) return; host.clearTimeout(s.timeout); s.status = '加载失败'; s.error = shortError(error); s.phase = '目标聊天读取失败'; queueRender(); notify(s.error); }
+                    } catch (error) { if (disposed || sessions.get(id) !== s) return; s.phase = '目标聊天读取失败'; failSession(s, shortError(error)); }
                 }, 0);
             };
             on(c.eventSource, events.APP_INITIALIZED || 'app_initialized', () => { s.appInitializedReceived = true; s.phase = 'APP_INITIALIZED 已触发，等待启动收尾'; }, s);
@@ -1546,11 +1707,9 @@
             s.lastErrorPhase = String(phase).slice(0, 100);
             s.issues ||= [];
             if (s.issues.length < 15) s.issues.push(typeof issue === 'object' ? JSON.parse(JSON.stringify(issue)) : String(issue).slice(0, 100));
-            if (!s.ready && issue?.kind === 'CHAT_INPUT_MISSING') {
-                host.clearTimeout(s.timeout);
-                s.phase = '输入框初始化失败'; s.status = '加载失败';
-                s.error = 'TT 初始化时未找到有效聊天输入框。请复制诊断，无需再等 60 秒。';
-                queueRender();
+            if (!s.ready && !s.error && issue?.kind === 'CHAT_INPUT_MISSING') {
+                s.phase = '输入框初始化失败';
+                failSession(s, 'TT 初始化时未找到有效聊天输入框。请复制诊断，无需再等 60 秒。');
             }
         }
     }
@@ -1643,18 +1802,20 @@
             });
         }, attachChild, reportChild, diagnostics, dispose,
         mode: 'multi-window',
-        ownsChild: (w, id) => !disposed && sessions.get(id)?.win === w && sessions.get(id)?.frame?.contentWindow === w,
+        ownsChild: (w, id) => !disposed && !sessions.get(id)?.released && sessions.get(id)?.win === w && sessions.get(id)?.frame?.contentWindow === w,
         ownsChat: (w, id, avatar, chat) => {
             const session = sessions.get(id);
-            if (disposed || session?.win !== w) return false;
+            if (disposed || session?.released || session?.win !== w) return false;
             const ownerAvatar = avatar || session.avatar || session.targetAvatar;
             return ![...sessions.values()].some(other => {
-                if (other === session) return false;
+                if (other === session || other.released) return false;
                 identity(other);
                 return (other.avatar || other.targetAvatar) === ownerAvatar && (other.chatId || other.targetChat) === String(chat).replace(/\.jsonl$/i, '');
             });
         },
         canReload: () => [...sessions.values()].every(s => {
+            // 已失败且没有待保存内容的卡不再阻止刷新。
+            if (s.error && !s.ready && !isBusy(s)) return true;
             if (!s.ready || isBusy(s) || s.profile?.blocked) return false;
             try { return !s.win?.document.querySelector('#send_textarea')?.value; } catch { return false; }
         }),
@@ -1684,6 +1845,15 @@
         const key = mainChatKey(); mainWriteVersions.set(key, (mainWriteVersions.get(key) || 0) + 1);
         mainFailedWrites.add(key); mainWriteState.writeFailed = true;
     };
+    // 保存若走了未被观察的路径，保护可能一直不解除：由用户确认后手动解除，仅针对当前回复版本。
+    function releaseMainProtection() {
+        if (!mainWriteState.writeFailed || mainWriteState.pendingWrites) return;
+        const snapshot = JSON.stringify([...mainWriteVersions]);
+        if (!host.confirm('只有在你已确认主页面聊天已经保存（例如刷新聊天后最新回复仍在）时才解除。\n解除后可以退出并行或刷新页面；若实际未保存，最新回复可能丢失。\n之后的新回复仍会重新受保护。确定解除？')) return;
+        if (mainWriteState.pendingWrites || JSON.stringify([...mainWriteVersions]) !== snapshot) return notify('期间又有新的回复或保存，请稍后再确认。');
+        mainFailedWrites.clear(); mainWriteState.writeFailed = false;
+        notify('已解除主页面的保存保护。'); render();
+    }
     const originalMainFetch = host.fetch;
     const observedMainFetch = async (input, init = {}) => {
         const url = new URL(typeof input === 'string' || input instanceof host.URL ? String(input) : input.url, host.location.href);
@@ -1694,6 +1864,22 @@
         if (typeof init.body === 'string') {
             let payload; try { payload = JSON.parse(init.body); } catch {}
             if (payload?.file_name) key = JSON.stringify([payload.avatar_url || ctx(host).characters[ctx(host).characterId]?.avatar, String(payload.file_name).replace(/\.jsonl$/i, '')]);
+            // 主页面重命名/删除的聊天正被某个副窗口使用时阻止；主页面自己的保存不受影响。
+            if (/\/(rename|delete)$/.test(url.pathname) && payload) {
+                const strip = name => String(name || '').replace(/\.jsonl$/i, '');
+                const avatar = payload.avatar_url || ctx(host).characters[ctx(host).characterId]?.avatar;
+                const target = strip(payload.original_file || payload.chatfile || payload.file_name);
+                const mainOwn = JSON.parse(mainChatKey());
+                const inChild = target && avatar && !(mainOwn[0] === avatar && mainOwn[1] === target) && [...sessions.values()].some(other => {
+                    if (other === main || other.released) return false;
+                    identity(other);
+                    return (other.avatar || other.targetAvatar) === avatar && (other.chatId || other.targetChat) === target;
+                });
+                if (inChild) {
+                    const message = '这份聊天正在并行副窗口中打开，已阻止重命名/删除。请先关闭那个副窗口。';
+                    notify(message); throw new Error(message);
+                }
+            }
         }
         const version = mainWriteVersions.get(key) || 0;
         mainWriteState.pendingWrites++;
@@ -1747,6 +1933,12 @@
     attachSession(main);
     const events = ctx(host).eventTypes || ctx(host).event_types;
     on(ctx(host).eventSource, events.APP_READY || 'app_ready', () => { appReady = true; queueRender(); }, main);
+    // 脚本可能在 APP_READY 之后才启动：角色已载入（或已打开聊天）即视为就绪。
+    // 只看 #send_textarea 不够——它在静态 HTML 里就存在。
+    try {
+        const c = ctx(host);
+        if ((Array.isArray(c.characters) && c.characters.length > 0) || (doc.getElementById('send_textarea') && (c.chatId || c.getCurrentChatId?.()))) appReady = true;
+    } catch {}
     const refresh = host.setInterval(() => {
         if (disposeRequested && ![...sessions.values()].some(isBusy)) { dispose(); return; }
         refreshLiveStatus();

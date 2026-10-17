@@ -1,11 +1,11 @@
-/* 并行对话 0.7.4 — 低内存单页面后台生成（基于 0.6.8-r7）。
+/* 并行对话 0.7.6 — 低内存单页面后台生成（基于 0.6.8-r7）。
  *
  * 不再为每个会话启动第二个酒馆页面（iframe）。切换对话时，只把正在进行的
  * 生成请求留在后台继续接收；切回该对话后，由酒馆原生流程把保存下来的响应
  * 重新走一遍（正则、变量脚本、保存都是原生逻辑）。不自行拼接提示词，不直接
  * 写聊天文件，不保存 API 密钥。
  */
-const VERSION = '0.7.4';
+const VERSION = '0.7.6';
 const KEY = '__PARALLEL_TAVERN_V2__';
 const MAX_SESSIONS = 3;
 const STORE = 'parallel-tavern.jobs.v1';
@@ -73,6 +73,42 @@ function signature(input, init) {
     } catch { /* 非 JSON 请求体按原样处理 */ }
     if (/generate-stream/.test(path)) sig.stream = true;
     return sig;
+}
+// ----- 纯函数：排序、时间解析、回车发送判断 -----
+function chatTimestamp(value) {
+    if (value == null || value === '') return 0;
+    const number = Number(value);
+    let time = Number.isFinite(number) ? number : Date.parse(value);
+    // 酒馆旧格式“June 1, 2024 3:04pm”：上下午前补空格后才能解析。
+    if (!Number.isFinite(time) && typeof value === 'string') time = Date.parse(value.replace(/(\d)\s*([ap]m)\s*$/i, '$1 $2'));
+    return Number.isFinite(time) && time > 0 ? time : 0;
+}
+// 聊天记录的时间：先看最后一条消息的时间，解析不了再看文件名里的“2024-6-1@15h04m05s”。
+function historyTime(chat) {
+    const time = chatTimestamp(chat?.last_mes);
+    if (time) return time;
+    const m = /(\d{4})-(\d{1,2})-(\d{1,2})\s*@\s*(\d{1,2})h\s*(\d{1,2})m\s*(\d{1,2})s/.exec(String(chat?.file_name || ''));
+    return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime() : 0;
+}
+const SORT_MODES = [['recent', '最近'], ['newest', '最新'], ['fav', '收藏'], ['most-chat', '最多聊天'], ['least-chat', '最少聊天']];
+const isFav = c => c?.fav === true || c?.fav === 'true';
+// 每次筛选只算一遍排序键；相同时按最近聊天排，保证结果稳定。
+function sortCharacters(characters, mode) {
+    const keys = new Map();
+    for (const c of characters) {
+        const recent = chatTimestamp(c.date_last_chat), size = Number(c.chat_size) || 0;
+        const main = mode === 'newest' ? chatTimestamp(c.date_added) || chatTimestamp(c.create_date)
+            : mode === 'fav' ? (isFav(c) ? 1 : 0) : mode === 'most-chat' ? size : mode === 'least-chat' ? -size : recent;
+        keys.set(c, [main, recent]);
+    }
+    return characters.sort((a, b) => { const x = keys.get(a), y = keys.get(b); return (y[0] - x[0]) || (y[1] - x[1]); });
+}
+// 与酒馆 send_on_enter 一致：-1 关闭、0 自动（手机上回车换行）、1 总是发送。Ctrl/Alt+回车是酒馆别的快捷键，不算发送。
+function enterSends(event, mode, mobile) {
+    if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.isComposing) return false;
+    if (mode == null || mode === '') return !mobile;
+    const value = Number(mode);
+    return value === 1 ? true : value === 0 ? !mobile : false;
 }
 
 export function start({ settings, save, installProfiles, nativeBusy, nativeSaving, nativeCore, regexEngine }) {
@@ -151,8 +187,8 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         if (errors.length > 12) errors.shift();
         log('error', where);
     }
-    const onWindowError = event => { if (/parallel|runtime\.js/i.test(String(event.filename || event.error?.stack || ''))) logError('window', event.error || event.message); };
-    const onRejection = event => { if (/runtime\.js|character-profiles\.js/.test(String(event.reason?.stack || ''))) logError('promise', event.reason); };
+    const onWindowError = event => { if (/parallel|runtime(-low-memory)?\.js/i.test(String(event.filename || event.error?.stack || ''))) logError('window', event.error || event.message); };
+    const onRejection = event => { if (/runtime(-low-memory)?\.js|character-profiles\.js/.test(String(event.reason?.stack || ''))) logError('promise', event.reason); };
     host.addEventListener('error', onWindowError);
     host.addEventListener('unhandledrejection', onRejection);
     teardown.push(() => { host.removeEventListener('error', onWindowError); host.removeEventListener('unhandledrejection', onRejection); });
@@ -270,16 +306,16 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         if (job.status !== 'running' && !job.bodyFlushed) {
             job.decoded += job.bodyDecoder.decode(); job.bodyFlushed = true;
         }
-        job.decodedAt = job.bytes;
         return job.decoded;
     }
+    const wholeBody = job => job.previewFormat === 'json' || (!job.sig?.stream && !/event-stream/i.test(job.head?.type || ''));
     function parsed(job) {
         if (job.head?.status >= 400) return { text: '', reasoning: '' };
         if (!job.previewFormat && job.chunks.length) {
             const first = new TextDecoder().decode(job.chunks[0]).trimStart();
             if (first) job.previewFormat = /^[[{"]/.test(first) ? 'json' : 'stream';
         }
-        if (job.previewFormat === 'json' || (!job.sig?.stream && !/event-stream/i.test(job.head?.type || ''))) {
+        if (wholeBody(job)) {
             // 非流式回复在收完前是半截 JSON，解析不出内容；收完再整体解析一次，避免每秒全量重解码。
             if (job.status === 'running') return job.parsed || { text: '', reasoning: '' };
             if (job.parsedAt !== job.bytes || !job.parsed) { job.parsed = parseBody(bodyText(job)); job.parsedAt = job.bytes; }
@@ -332,10 +368,17 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         job.errorChecked = job.bytes; job.errorText = text;
         return text;
     }
+    // 本机备份合并写入：短时间内多次变化只序列化一次；页面隐藏/关闭前立即写完。
+    let persistTimer = null;
     function persist() {
+        if (persistTimer !== null || disposed) { if (disposed) flushPersist(); return; }
+        persistTimer = later(flushPersist, 100);
+    }
+    function flushPersist() {
+        if (persistTimer !== null) { cancelLater(persistTimer); persistTimer = null; }
+        const list = [];
+        let size = 0, omitted = 0;
         try {
-            const list = [];
-            let size = 0, omitted = 0;
             for (const job of jobs.values()) {
                 if ((job.attached && !job.saveFailed && !job.awaitingNativeSave) || job.status === 'running' || !job.head) continue;
                 // 已经写进聊天文件的回复不必再在本机存一份全文，只留一条记录用来显示“待查看”。
@@ -349,11 +392,28 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             else host.localStorage.removeItem(STORE);
             storageStatus = { state: omitted ? 'limited' : list.length ? 'saved' : 'empty', omitted };
         } catch {
-            storageStatus = { state: 'failed', omitted: 0 };
+            // 写不下（配额满）：旧列表绝不能留着，否则刷新后会把已处理的回复再写一遍。
+            // 先清掉，再从最新的开始逐条放回，放不下的不存。
+            let kept = [];
+            try { host.localStorage.removeItem(STORE); } catch { /* ignore */ }
+            try {
+                list.sort((a, b) => (b.finishedAt || 0) - (a.finishedAt || 0));
+                for (const item of list) {
+                    try { host.localStorage.setItem(STORE, JSON.stringify([...kept, item])); kept.push(item); } catch { /* 这条放不下 */ }
+                }
+                if (!kept.length) host.localStorage.removeItem(STORE);
+            } catch { kept = []; }
+            storageStatus = kept.length ? { state: 'limited', omitted: omitted + list.length - kept.length } : { state: 'failed', omitted: 0 };
         }
         // Keep this warning in the panel so a completion toast cannot hide it.
         if (storageStatus.state === 'limited' || storageStatus.state === 'failed') queueRender();
     }
+    const flushHidden = () => { if (doc.hidden && persistTimer !== null) flushPersist(); };
+    const flushNow = () => { if (persistTimer !== null) flushPersist(); };
+    host.addEventListener('pagehide', flushNow);
+    host.addEventListener('beforeunload', flushNow);
+    doc.addEventListener('visibilitychange', flushHidden);
+    teardown.push(() => { host.removeEventListener('pagehide', flushNow); host.removeEventListener('beforeunload', flushNow); doc.removeEventListener('visibilitychange', flushHidden); flushNow(); });
     function restore() {
         try {
             const list = JSON.parse(host.localStorage.getItem(STORE) || '[]');
@@ -373,13 +433,14 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         const session = sessions.get(job.key);
         if (session?.job === job) { session.job = null; session.unread = false; }
         if (replayArm?.job === job) releaseReplay();
-        persist(); queueRender();
+        // 删除必须立刻落盘：旧记录多留一刻，刷新后就可能把已处理的回复再写一遍。
+        flushPersist(); queueRender();
     }
+    // 前台已接回、已收完且确认保存过的任务才算处理完；保存失败或等待保存的必须留着。
+    const handled = job => job.attached && !job.detaching && !job.pendingDetach && job.status !== 'running' && !job.saveFailed && !job.awaitingNativeSave;
     function settle() {
         if (isGenerating() || nativeStream() || nativeSaving?.() === true) return;
-        for (const job of [...jobs.values()]) {
-            if (job.attached && !job.detaching && !job.pendingDetach && job.status !== 'running' && !job.saveFailed && !job.awaitingNativeSave) drop(job);
-        }
+        for (const job of [...jobs.values()]) if (handled(job)) drop(job);
     }
     function finish(job, error) {
         if (job.status === 'running') job.status = 'done';
@@ -399,11 +460,12 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         const session = sessions.get(job.key);
         if (!session || session.job !== job) return;
         persist();
-        if (job.key === curKey && !switching) { scheduleReattach(50); return; }
+        if (job.key === curKey && !switching) { if (doc.hidden) completionAlert(job); scheduleReattach(50); return; }
         session.unread = true;
         pumpBgWrites();
         if (switching) return;
         completionSound();
+        completionAlert(job);
         notify(jobError(job) ? `${cardLabel(job.key, job.name)} 的后台生成失败，切回可查看原因。` : `${cardLabel(job.key, job.name)} 的回复已完成，可以切回查看。`);
     }
     function pump(job, request) {
@@ -451,10 +513,13 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
                     job.keepPartial = job.bytes > 0; job.awaitingNativeSave = job.keepPartial;
                     job.status = 'stopped'; try { job.ac.abort(); } catch { /* ignore */ }
                 }
+                // 回放一份早已收完的回复时用户点了停止：完整原文不能丢，改为留在面板里待处理。
+                const replayStop = userStop && !!job.replaySig && job.status !== 'running' && !job.keepPartial && jobs.has(job.id);
                 const front = job.front; job.front = null;
                 try { front?.error(abortError()); } catch { /* already closed */ }
                 if (!settled) { settled = true; reject(abortError()); }
-                if (userStop) { later(() => { if (jobs.has(job.id) && job.status !== 'running' && !job.keepPartial) drop(job); }, 0); }
+                if (replayStop) keepStoppedReplay(job);
+                else if (userStop) { later(() => { if (jobs.has(job.id) && job.status !== 'running' && !job.keepPartial) drop(job); }, 0); }
             };
             if (signal?.aborted) { onAbort(); return; }
             signal?.addEventListener('abort', onAbort);
@@ -469,6 +534,13 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             if (job.head) deliver();
         });
     }
+    // 标成“未自动写入”：不再自动接回（不会循环），面板里可复制、写入或丢弃。
+    function keepStoppedReplay(job) {
+        job.attached = false; job.replaySig = null; job.mismatch = true;
+        const session = sessions.get(job.key); if (session?.job === job) session.unread = true;
+        log('replay:stopped-kept', { s: sid(job.key) });
+        persist(); queueRender();
+    }
     function intercept(arm, input, init) {
         const signal = init?.signal || (typeof input === 'object' ? input.signal : null);
         const sig = signature(input, init);
@@ -478,7 +550,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         // The host has already built this request. Validate ownership/readiness
         // without changing the settings used to construct its body.
         try { profile?.prepareSend?.({ stage: 'request' }); } catch (error) { building = null; throw error; }
-        for (const old of [...jobs.values()]) if (old.attached && old.status !== 'running') drop(old);
+        for (const old of [...jobs.values()]) if (handled(old)) drop(old);
         const info = arm.gen.info;
         if (current().key !== info.key) throw new Error('生成请求所属聊天已改变，已阻止发送');
         const session = ensureSession(info);
@@ -542,10 +614,17 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         }
         if (readings.size > 40) readings.delete(readings.keys().next().value);
     }
-    const onChatScroll = () => { if (readingTimer === null) readingTimer = later(() => { readingTimer = null; recordReading(); }, 150); };
+    let readingAt = 0, readingDirty = true, readingKey = null;
+    const onChatScroll = () => { readingDirty = true; if (readingTimer === null) readingTimer = later(() => { readingTimer = null; recordReading(); }, 150); };
     scroller()?.addEventListener('scroll', onChatScroll, { passive: true });
     // 点聊天区以外的任何东西（角色列表、历史记录、关闭聊天…）之前先记一次，不依赖滚动事件。
-    const onOutsideClick = event => { if (!event.target?.closest?.('#chat')) { navIntentAt = Date.now(); recordReading(); } };
+    // 连续点击时没滚动过就不必重量一遍所有楼层；最多 500ms 一次。
+    const onOutsideClick = event => {
+        if (event.target?.closest?.('#chat')) return;
+        navIntentAt = Date.now();
+        if (!readingDirty && readingKey === curKey && Date.now() - readingAt < 500) return;
+        readingDirty = false; readingKey = curKey; readingAt = Date.now(); recordReading();
+    };
     doc.addEventListener('click', onOutsideClick, true);
     teardown.push(() => { scroller()?.removeEventListener('scroll', onChatScroll); doc.removeEventListener('click', onOutsideClick, true); cancelLater(readingTimer); cancelRestore(); });
     const pendingWrite = key => { const job = sessions.get(key)?.job; return !!job && !job.mismatch; };
@@ -583,22 +662,25 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
 
     const nativeFetch = host.fetch;
     function parallelFetch(input, init) {
-        let saveKey = null;
+        let saveKey = null, metaOnly = false;
         try {
             const url = new URL(typeof input === 'string' ? input : input?.url || String(input), host.location.href);
-            if (/\/api\/chats\/(save|save-metadata)$/.test(url.pathname) && String(init?.method || input?.method || 'GET').toUpperCase() === 'POST') {
-                saveKey = current().key;
+            const route = /\/api\/chats\/(save|save-metadata)$/.exec(url.pathname);
+            if (route && String(init?.method || input?.method || 'GET').toUpperCase() === 'POST') {
+                saveKey = current().key; metaOnly = route[1] === 'save-metadata';
                 if (typeof init?.body === 'string') {
                     try { const body = JSON.parse(init.body); if (typeof body.avatar_url === 'string' && typeof body.file_name === 'string') saveKey = body.avatar_url + '\n' + body.file_name; } catch { /* compressed body uses native current-chat snapshot */ }
                 }
             }
         } catch { /* no route */ }
         if (saveKey && !disposed) {
-            const sequence = (nativeSaveSequence.get(saveKey) || 0) + 1;
-            nativeSaveSequence.set(saveKey, sequence);
+            // 只保存元数据的请求不含消息：成功不算“回复已保存”，也不打断消息保存的先后判断；失败照样记下。
+            const sequence = metaOnly ? null : (nativeSaveSequence.get(saveKey) || 0) + 1;
+            if (!metaOnly) nativeSaveSequence.set(saveKey, sequence);
             const owner = sessions.get(saveKey)?.job;
             const note = error => {
-                if (nativeSaveSequence.get(saveKey) !== sequence) return;
+                if (!metaOnly && nativeSaveSequence.get(saveKey) !== sequence) return;
+                if (metaOnly && !error) return;
                 const job = sessions.get(saveKey)?.job === owner ? owner : null;
                 if (error) {
                     nativeSaveFailures.set(saveKey, error);
@@ -1495,11 +1577,48 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         host.removeEventListener('pointerdown', unlockSound, true); host.removeEventListener('keydown', unlockSound, true);
         if (audioContext) void audioContext.close().catch(() => {});
     });
+    // ----- 完成提醒：振动、系统通知、标题未读数。只针对后台会话（静默生成不会建任务）。 -----
+    const alertOn = () => settings.completionAlert !== false;
+    const notices = new Map();
+    function completionAlert(job) {
+        if (!alertOn() || disposed) return;
+        const away = doc.hidden || job.key !== curKey;
+        if (!away) return;
+        try { host.navigator.vibrate?.([120, 60, 120]); } catch { /* 不支持振动 */ }
+        if (settings.completionNotify !== true || !doc.hidden) return;
+        try {
+            if (host.Notification?.permission !== 'granted') return;
+            const key = job.key;
+            const note = new host.Notification('并行对话', { body: `${job.name || '角色'} ${jobError(job) ? '的后台生成失败' : '的回复已完成'}`, tag: 'pt-' + key });
+            notices.get(key)?.close?.(); notices.set(key, note);
+            note.onclick = () => {
+                try { host.focus(); } catch { /* ignore */ }
+                try { note.close(); } catch { /* ignore */ }
+                notices.delete(key);
+                const session = sessions.get(key);
+                if (session && !disposed) void openSession(session);
+            };
+            note.onclose = () => { if (notices.get(key) === note) notices.delete(key); };
+        } catch { /* 通知不可用 */ }
+    }
+    const TITLE_MARK = /^\(\d+\) /;
+    function updateTitle(count) {
+        try {
+            const base = doc.title.replace(TITLE_MARK, '');
+            const next = !disposed && alertOn() && isOn() && count > 0 ? `(${count}) ${base}` : base;
+            if (doc.title !== next) doc.title = next;
+        } catch { /* ignore */ }
+    }
+    teardown.push(() => {
+        try { doc.title = doc.title.replace(TITLE_MARK, ''); } catch { /* ignore */ }
+        for (const note of notices.values()) { try { note.close(); } catch { /* ignore */ } }
+        notices.clear();
+    });
 
     // ----- 界面 -----
     let launcherVisible = settings.showLauncher !== false;
     let panelOpen = false, pickerOpen = false, menuOpen = false, controlsKey = null;
-    let launcherSide = null, launcherSignature = '', badgeSignature = '';
+    let launcherSide = null, launcherSignature = '', badgeSignature = '', titleSignature = '';
     let launcherRatio = 0.5;
     try {
         const dock = JSON.parse(host.localStorage.getItem('parallel-tavern.launcher-dock') || 'null');
@@ -1630,9 +1749,10 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             const face = faces.find(node => node.dataset.ptSession === badge.dataset.ptSession);
             badge.hidden = !face;
             if (!face) continue;
-            const r = face.getBoundingClientRect();
-            badge.style.setProperty('left', `${Math.max(2, r.right - 8)}px`, 'important');
-            badge.style.setProperty('top', `${Math.max(2, r.top - 5)}px`, 'important');
+            // 放在自己头像的正上方居中：头像互相叠 4px，放右上角会像是下一个头像的角标。
+            const r = face.getBoundingClientRect(), vw = host.innerWidth || doc.documentElement.clientWidth || 360;
+            badge.style.setProperty('left', `${Math.max(2, Math.min(vw - 18, r.left + r.width / 2 - 8))}px`, 'important');
+            badge.style.setProperty('top', `${Math.max(2, r.top - 10)}px`, 'important');
         }
     }
     function show(node, visible) {
@@ -1801,6 +1921,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             if (!detail) return { state: 'busy', busy: true, label: '' };
             if (here && job.attached && !job.detaching && !job.pendingDetach) return { state: 'busy', busy: true, label: '正在回复…' };
             const got = parsed(job);
+            if (!got.text && !got.reasoning && job.head && wholeBody(job)) return { state: 'busy', busy: true, label: job.bytes ? `后台生成中 · 非流式·已接收 ${Math.max(1, Math.round(job.bytes / 1024))} KB` : '后台生成中 · 非流式·接收中' };
             return { state: 'busy', busy: true, label: got.text ? `后台生成中 · 已收到 ${got.text.length} 字` : got.reasoning ? `后台生成中 · 正在思考（${got.reasoning.length} 字）` : '后台生成中 · 等待首个字' };
         }
         if (job && (!job.attached || job.detaching || job.pendingDetach)) {
@@ -1832,11 +1953,11 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         const completed = all.filter(s => s.unread);
         const finished = completed.length > 0 || (!!fgFinishedKey && fgFinishedKey === curKey);
         launcher.dataset.state = running ? 'generating' : finished ? 'completed' : 'idle';
-        const sig = JSON.stringify([isOn(), running, completed.length, all.map(s => [s.key, s.name])]);
+        const sig = JSON.stringify([isOn(), running, completed.length, all.map(s => [s.key, s.name, !!s.unread])]);
         if (sig !== launcherSignature) {
             launcherSignature = sig;
             const dock = element('span', 'pt-dock'), faces = element('span', 'pt-dock-faces');
-            for (const s of all) { const face = stablePortrait('dock:' + s.key, s); face.dataset.ptSession = s.key; faces.append(face); }
+            for (const s of all) { const face = stablePortrait('dock:' + s.key, s); face.dataset.ptSession = s.key; face.dataset.unread = String(!!s.unread); faces.append(face); }
             if (!all.length) faces.append(portrait({ name: '并' }));
             const label = element('span', 'pt-dock-label', completed.length ? `${completed.length} 个已完成` : '并行会话');
             label.append(element('span', 'pt-dock-note', !isOn() ? '点击开启' : running ? `${running} 个正在回复` : '点开查看会话'));
@@ -1851,6 +1972,8 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             completionBadge.replaceChildren(...completed.map(s => { const badge = element('span', 'pt-avatar-badge', String(order.indexOf(s.key) + 1)); badge.dataset.ptSession = s.key; return badge; }));
         }
         show(completionBadge, completed.length > 0 && !launcherSide); positionCompletionBadge();
+        const titleSig = `${alertOn() && isOn() ? completed.length : 0}|${doc.title}`;
+        if (titleSig !== titleSignature) { updateTitle(completed.length); titleSignature = `${alertOn() && isOn() ? completed.length : 0}|${doc.title}`; }
         const label = launcherSide ? `并行对话：${running ? `${running} 个会话正在生成` : finished ? '生成已完成' : '暂无生成'}；点击或向内滑动展开`
             : completed.length ? `并行对话：${completed.map(s => s.name).join('、')} 已生成完成，待查看` : '并行对话；拖到边缘后向外滑动可收起';
         launcher.title = label; launcher.setAttribute('aria-label', label);
@@ -1867,10 +1990,34 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         applyTheme(); updateLauncher();
         launcher.setAttribute('aria-expanded', String(!launcherSide && panelOpen));
         show(panel, panelOpen); picker.hidden = !pickerOpen; show(launcher, true);
+        // 重建面板会丢掉焦点（键盘、读屏用户）：记下焦点在哪张卡的哪个按钮上，重建后放回同一位置。
+        const focused = doc.activeElement && doc.activeElement !== panel && panel.contains(doc.activeElement) ? focusMark(doc.activeElement) : null;
         // 先填内容再定位：面板高度随内容变化，按旧高度定位会把下半截推到屏幕外。
         if (panelOpen) buildPanel();
+        if (focused && !panel.contains(doc.activeElement)) restoreFocus(focused);
         keepFloatingVisible();
     }
+    const FOCUSABLE = 'button, input, select, textarea, summary';
+    function focusMark(node) {
+        return { session: node.closest('[data-session]')?.dataset.session ?? null, label: node.getAttribute('aria-label') || node.textContent || '', cls: node.className, id: node.id };
+    }
+    function restoreFocus(mark) {
+        if (!panelOpen || panel.hidden) return;
+        const nodes = [...panel.querySelectorAll(FOCUSABLE)].filter(node => (node.closest('[data-session]')?.dataset.session ?? null) === mark.session);
+        const target = (mark.id && nodes.find(node => node.id === mark.id)) || nodes.find(node => (node.getAttribute('aria-label') || node.textContent || '') === mark.label)
+            || nodes.find(node => node.className === mark.cls) || null;
+        try { target?.focus({ preventScroll: true }); } catch { /* ignore */ }
+    }
+    // Esc 关闭面板（含选择角色页），焦点回到悬浮入口。只处理焦点在本扩展界面里时，不抢酒馆自己的 Esc。
+    const onPanelKey = event => {
+        if (event.key !== 'Escape' || event.isComposing || !panelOpen) return;
+        if (!panel.contains(event.target) && event.target !== launcher) return;
+        event.preventDefault(); event.stopPropagation();
+        panelOpen = false; pickerOpen = false; menuOpen = false; render();
+        try { launcher.focus({ preventScroll: true }); } catch { /* ignore */ }
+    };
+    doc.addEventListener('keydown', onPanelKey, true);
+    teardown.push(() => doc.removeEventListener('keydown', onPanelKey, true));
     function buildPanel() {
         if (pickerOpen) { if (picker.parentNode !== panel) panel.replaceChildren(picker); return; }
         panel.replaceChildren();
@@ -1977,14 +2124,9 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
     const liveTimer = host.setInterval(refreshLive, 1000);
     teardown.push(() => host.clearInterval(liveTimer));
 
-    function chatTimestamp(value) {
-        if (value == null || value === '') return 0;
-        const number = Number(value), time = Number.isFinite(number) ? number : Date.parse(value);
-        return Number.isFinite(time) && time > 0 ? time : 0;
-    }
     // 角色搜索的排序方式，和名称搜索叠加使用；选择记在本机。
     const SORT_KEY = 'parallel-tavern.picker-sort';
-    const SORT_MODES = [['recent', '最近'], ['newest', '最新'], ['most-chat', '最多聊天'], ['least-chat', '最少聊天']];
+    let pickerMemo = null;        // 进“其他对话”前的搜索词、排序和滚动位置，返回时还原
     function sortSelect() {
         const select = element('select'); select.id = 'pt-sort'; select.setAttribute('aria-label', '角色排序方式');
         for (const [value, label] of SORT_MODES) { const option = element('option', '', label); option.value = value; select.append(option); }
@@ -1994,34 +2136,29 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         return select;
     }
     function saveSortMode(value) { try { host.localStorage.setItem(SORT_KEY, value); } catch { /* optional */ } }
-    function sortCharacters(characters, mode, recentTime) {
-        const added = c => chatTimestamp(c.date_added) || chatTimestamp(c.create_date);
-        const size = c => Number(c.chat_size) || 0;
-        const key = { newest: c => added(c), 'most-chat': size, 'least-chat': c => -size(c) }[mode] || recentTime;
-        // 相同时按最近聊天排，保证结果稳定。
-        return characters.sort((a, b) => (key(b) - key(a)) || (recentTime(b) - recentTime(a)));
-    }
     function showPicker() {
+        const memo = pickerMemo; pickerMemo = null;
         pickerOpen = true; panelOpen = true;
         picker.replaceChildren();
         const row = element('div', 'pt-row');
         row.append(element('span', 'pt-heading', '打开对话'), button('返回', () => { pickerOpen = false; render(); }));
         const search = element('input'); search.id = 'pt-search'; search.placeholder = '搜索角色名称'; search.setAttribute('aria-label', '搜索角色名称');
         const sort = sortSelect();
+        if (memo) { search.value = memo.search; if (SORT_MODES.some(([value]) => value === memo.sort)) sort.value = memo.sort; }
         const bar = element('div', 'pt-search-bar'); bar.append(search, sort);
         const list = element('div'); list.id = 'pt-character-list';
         const fill = () => {
             list.replaceChildren();
             const filter = search.value.toLocaleLowerCase();
             const characters = ctx().characters.filter(c => c?.avatar && String(c.name || '').toLocaleLowerCase().includes(filter));
-            sortCharacters(characters, sort.value, c => chatTimestamp(c.date_last_chat));
+            sortCharacters(characters, sort.value);
             for (const c of characters.slice(0, 120)) {
                 const item = element('div', 'pt-character-choice');
                 const recent = button('', () => void openSession({ avatar: c.avatar }), c.name);
                 const copy = element('span', 'pt-character-copy', c.name);
                 copy.append(element('span', 'pt-muted', '最近聊天'));
                 recent.append(portrait(c), copy);
-                const history = button('其他对话', () => void showHistory(c), `${c.name}的其他对话`);
+                const history = button('其他对话', () => { pickerMemo = { search: search.value, sort: sort.value, scroll: panel.scrollTop }; void showHistory(c); }, `${c.name}的其他对话`);
                 const arrow = element('span', 'pt-history-arrow', '→'); arrow.setAttribute('aria-hidden', 'true'); history.append(arrow);
                 item.append(recent, history); list.append(item);
             }
@@ -2029,9 +2166,11 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             if (characters.length > 120) list.append(element('p', 'pt-muted', '仅显示前 120 个，请继续输入名称筛选。'));
             keepFloatingVisible();
         };
-        search.addEventListener('input', fill);
-        sort.addEventListener('change', () => { saveSortMode(sort.value); fill(); });
+        let searchTimer = null;
+        search.addEventListener('input', () => { cancelLater(searchTimer); searchTimer = later(() => { searchTimer = null; if (search.isConnected) fill(); }, 150); });
+        sort.addEventListener('change', () => { cancelLater(searchTimer); saveSortMode(sort.value); fill(); });
         picker.append(row, bar, list); fill(); render();
+        if (memo) panel.scrollTop = memo.scroll;
     }
     async function showHistory(character) {
         pickerOpen = true; panelOpen = true; picker.replaceChildren();
@@ -2048,7 +2187,8 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             if (!data || data.error) throw new Error('酒馆没有返回聊天记录');
             if (!list.isConnected || !pickerOpen) return;
             const chats = Object.values(data).filter(x => x && typeof x.file_name === 'string');
-            chats.sort((a, b) => String(b.last_mes || b.file_name).localeCompare(String(a.last_mes || a.file_name)));
+            const times = new Map(chats.map(chat => [chat, historyTime(chat)]));
+            chats.sort((a, b) => (times.get(b) - times.get(a)) || b.file_name.localeCompare(a.file_name));
             list.replaceChildren();
             for (const chat of chats) {
                 const name = chat.file_name.replace(/\.jsonl$/i, '');
@@ -2069,23 +2209,38 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
         if (!isOn()) return;
         const target = event.target?.closest?.('.character_select[data-chid], .character_select[chid]');
         if (!target) return;
+        // 批量编辑（多选角色）时的点击交给酒馆自己处理。
+        if (event.target.closest('.bulk_select_checkbox, .group_overlay_mode_select') || doc.getElementById('rm_print_characters_block')?.classList.contains('group_overlay_mode_select')) return;
         const character = ctx().characters[Number(target.dataset.chid ?? target.getAttribute('chid'))];
         if (!character?.avatar || (character.avatar === current().avatar && !switching)) return;
+        // 会话已满、要打开的不是已有会话、而且什么都没在进行：照常让酒馆切换，只是不建卡。
+        const known = [...sessions.keys()].some(key => key.startsWith(character.avatar + '\n'));
+        if (!known && sessions.size >= MAX_SESSIONS && !switching && !reattachBusy && !replayArm && !bgActive && !isGenerating() && !isSwiping() && !nativeStream() && nativeSaving?.() !== true && !foregroundJob()
+            && !nativeSaveChains.size && !nativeSaveFailures.has(current().key) && !sessions.get(current().key)?.job) return;
         event.preventDefault(); event.stopImmediatePropagation();
         void openSession({ avatar: character.avatar });
     };
     doc.addEventListener('click', captureCharacterClick, true);
     teardown.push(() => doc.removeEventListener('click', captureCharacterClick, true));
 
+    const sendOnEnterMode = () => { try { return ctx().powerUserSettings?.send_on_enter; } catch { return null; } };
+    // 酒馆按 UA 判断手机/平板；拿不到时用粗指针兜底。
+    const mobileHost = () => {
+        try { if (/Mobi|Android|iPhone|iPad|iPod|HarmonyOS/i.test(host.navigator.userAgent || '')) return true; } catch { /* ignore */ }
+        try { return !!host.matchMedia?.('(pointer:coarse)')?.matches; } catch { return false; }
+    };
     const noteSendIntent = event => {
         // A returned chat can still have a detached response waiting for the
         // scheduled native replay. Starting another manual generation here would
         // fall through intercept() as an untracked request and block switching.
         // Allow the replay trigger itself, but keep user actions waiting until
         // that original response is attached or explicitly handled.
+        // Ctrl/Alt+回车由酒馆转成点击“重新生成/继续”，走下面的点击判断。
+        const enterSend = event.type === 'keydown' && event.key === 'Enter' && event.target?.id === 'send_textarea' && enterSends(event, sendOnEnterMode(), mobileHost());
+        const sendClick = event.type === 'click' && !!event.target?.closest?.('#send_but');
         const wantsGeneration = event.type === 'click'
             ? event.target?.closest?.('#send_but, #option_regenerate, #option_continue, #mes_continue, #chat .swipe_right')
-            : event.target?.id === 'send_textarea' && event.key === 'Enter' && !event.shiftKey && !event.isComposing;
+            : enterSend;
         const job = isOn() ? sessions.get(current().key)?.job : null;
         const nativeReplayClick = event.type === 'click' && !event.isTrusted && !!replayArm && replayArm.job === job;
         if (wantsGeneration && !nativeReplayClick) {
@@ -2114,7 +2269,7 @@ export function start({ settings, save, installProfiles, nativeBusy, nativeSavin
             } else notify('这份聊天的后台回复尚未处理，请先写入或丢弃；也可先复制备份，仍可切换其他会话。');
             return;
         }
-        if (event.type === 'click' ? event.target?.closest?.('#send_but') : event.target?.id === 'send_textarea' && event.key === 'Enter' && !event.shiftKey && !event.isComposing) sendIntentAt = Date.now();
+        if (sendClick || enterSend) sendIntentAt = Date.now();
     };
     doc.addEventListener('click', noteSendIntent, true);
     doc.addEventListener('keydown', noteSendIntent, true);

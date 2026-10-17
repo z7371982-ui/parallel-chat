@@ -29,7 +29,31 @@ function selection(context, doc) {
     return value;
 }
 
-export function installCharacterProfiles(win, { settings, save, busy = () => false, notify = () => {}, nativeProxy, initialSelection }) {
+// 角色记录只含这些名称字段；导入导出都经过这里，网址、密钥等其他字段一律丢弃。
+export function sanitizeProfile(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const { api, source, preset, model, proxy } = value;
+    if (!['openai', 'textgenerationwebui'].includes(api) || [source, preset].some(v => typeof v !== 'string' || !v || v.length > 1000) || typeof model !== 'string' || model.length > 1000) return null;
+    const clean = { api, source, preset, model };
+    if (api === 'openai') clean.proxy = { preset: proxy && typeof proxy === 'object' && typeof proxy.preset === 'string' && proxy.preset && proxy.preset.length <= 1000 ? proxy.preset : null };
+    return clean;
+}
+
+// 这次回车宿主是否会触发生成：对应酒馆 powerUserSettings.send_on_enter（-1 关闭，0 自动=仅桌面，1 始终）。
+// 自动模式按触屏（pointer:coarse）视为手机、回车只换行；Ctrl+回车是酒馆的重新生成，始终算。低内存运行时可照此判断。
+export function sendsOnEnter(win, event) {
+    if (event.type !== 'keydown' || event.key !== 'Enter' || event.target?.id !== 'send_textarea' || event.shiftKey || event.altKey || event.isComposing || event.keyCode === 229) return false;
+    if (event.ctrlKey) return true;
+    let mode = 0;
+    try { mode = Number(win.SillyTavern.getContext().powerUserSettings?.send_on_enter ?? 0); } catch {}
+    if (mode === 1) return true;
+    if (mode === -1) return false;
+    return !win.matchMedia?.('(pointer: coarse)')?.matches;
+}
+// 与低内存运行时一致：发送、重新生成、继续、右滑新回复都会触发生成。
+const GENERATE_TARGETS = '#send_but, #option_regenerate, #option_continue, #mes_continue, #chat .swipe_right';
+
+export function installCharacterProfiles(win, { settings, save, busy = () => false, notify = () => {}, nativeProxy }) {
     const context = () => win.SillyTavern.getContext();
     const avatar = () => { const c = context(); return !c.groupId && c.characters?.[c.characterId]?.avatar || null; };
     const events = context().eventTypes || context().event_types || {};
@@ -65,21 +89,20 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
     let appReadySeen = false;
     // 第一次就绪时把当前正在用的设置记为默认配置（只在主页面，且仅当还没有默认配置）。
     const captureDefault = () => {
-        // 每次启动都以你当时正在用的设置为准，不沿用旧记录。
+        // 已有默认配置就不覆盖；之后只能用「以当前设置为默认配置」更换。
         if (stopped || !enabled() || !appReadySeen || defaultCaptured || dedicatedApplied || win !== win.top || applying || waitingPreset) return;
+        if (settings.defaultProfile) { defaultCaptured = true; return; }
         defaultCaptured = true;
         const value = read();
         if (value) { settings.defaultProfile = value; save(); }
     };
     const restorePending = () => hasProfile() && observedAvatar !== avatar();
     const record = () => {
-        if (stopped || applying || waitingPreset || !nativeLoaded || restoreFailed || synchronizingProxy) return;
+        // 只在「保存为本角色设置」后记录；平时的按键与设置变化直接返回，不读取设置。
+        if (!pendingEdit || stopped || applying || waitingPreset || !nativeLoaded || restoreFailed || synchronizingProxy) return;
         const id = avatar(), value = read();
         if (!enabled()) { observedAvatar = id; observed = signature(value); pendingEdit = false; return; }
         if (!id || !value || id !== observedAvatar) return;
-        // Native settings loading/SETTINGS_UPDATED must never manufacture a
-        // role record from a transient startup default.
-        if (!pendingEdit) return;
         const next = signature(value);
         pendingEdit = false;
         if (next === observed && Object.hasOwn(settings.characterProfiles || {}, id)) return;
@@ -90,7 +113,7 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
         Object.defineProperty(settings.characterProfiles, id, { value: { ...previous, ...value }, enumerable: true, configurable: true, writable: true });
         save();
     };
-    const schedule = () => { win.clearTimeout(timer); timer = win.setTimeout(record, 200); };
+    const schedule = () => { if (!pendingEdit) return; win.clearTimeout(timer); timer = win.setTimeout(record, 200); };
     function on(name, fn) {
         if (!name || !emitter?.on) return;
         emitter.on(name, fn);
@@ -185,7 +208,6 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
         if (!saved) {
             // No role record means use this document's current native settings.
             // Do not inherit another role's snapshot, change fields, or save.
-            initialSelection = null;
             observedAvatar = id; observed = signature(read()); pendingEdit = false;
             restoreFailed = false;
             return;
@@ -194,7 +216,6 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
         if (busy()) { win.clearTimeout(resumeTimer); resumeTimer = win.setTimeout(() => { if (!stopped && restorePending()) activate(); }, 800); return; }
         const value = saved;
         // Old snapshots contribute their name only; no credentials are copied.
-        let completed = false;
         applying = true;
         try {
             if (value && ['openai', 'textgenerationwebui'].includes(value.api)) {
@@ -236,7 +257,6 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
                 if (read()?.model !== value.model) throw new Error('宿主未接受保存的模型选择');
             }
             restoreFailed = false;
-            completed = true;
             dedicatedApplied = !!own(id);
 
         } catch (error) {
@@ -247,10 +267,7 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
         } finally {
             applying = false; waitingPreset = false; pendingEdit = false;
             // A stale restore must not mark the next role as already restored.
-            if (!stopped && avatar() === id) {
-                observedAvatar = id; observed = signature(read());
-                if (completed) initialSelection = null;
-            }
+            if (!stopped && avatar() === id) { observedAvatar = id; observed = signature(read()); }
         }
     }
     function activate() {
@@ -283,10 +300,10 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
         if (/^(main_api|chat_completion_source|textgen_type|settings_preset_|model_|custom_model_id|azure_openai_model|openai_proxy_|openai_reverse_proxy)/.test(id) || id.endsWith('_model')) {
             schedule();
         }
-        if (!waitingPreset) Promise.resolve().then(record);
+        if (!waitingPreset && pendingEdit) Promise.resolve().then(record);
     };
     const guardSend = event => {
-        if (event.type === 'click' ? event.target?.closest?.('#send_but') : event.target?.id === 'send_textarea' && event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+        if (event.type === 'click' ? event.target?.closest?.(GENERATE_TARGETS) : sendsOnEnter(win, event)) {
             try { prepareSend(); return; } catch {}
             event.preventDefault(); event.stopImmediatePropagation();
             notify(restoreFailed ? '角色配置恢复失败，请重新选择正确的预设、模型和代理后再发送。' : '正在恢复角色的预设、模型与代理，请稍后发送。');
@@ -398,9 +415,23 @@ export function installCharacterProfiles(win, { settings, save, busy = () => fal
             void activate();
             return true;
         },
+        // 供设置面板显示：本角色用的是专属设置、默认配置还是未记录，以及对应名称。
+        describe() {
+            if (!enabled()) return { state: 'off' };
+            const c = context(), id = avatar();
+            if (!id) return { state: 'no-character' };
+            const mine = Object.hasOwn(settings.characterProfiles || {}, id) ? settings.characterProfiles[id] : null;
+            // 没有专属设置时显示实际在用的设置；与默认配置一致才算「使用默认配置」。
+            const current = mine ? null : read(), def = settings.defaultProfile;
+            const usingDefault = !!(def && current && ['api', 'source', 'preset', 'model'].every(k => current[k] === def[k]) && (current.proxy?.preset || null) === (def.proxy?.preset || null));
+            const value = mine || current;
+            return { state: mine ? 'own' : usingDefault ? 'default' : 'none', avatar: id, name: c.characters?.[c.characterId]?.name || id,
+                preset: value?.preset || null, model: value?.model || null, proxy: value?.proxy?.preset || null, failed: restoreFailed };
+        },
         get blocked() { return enabled() && (applying || waitingPreset || restoreFailed || restorePending() || hasProfile() && !nativeLoaded); },
+        // 正在切换或恢复失败时返回 null（不抛错），不阻止打开新角色。
         capture() {
-            if (enabled() && (hasProfile() && !nativeLoaded || applying || waitingPreset || synchronizingProxy || restoreFailed)) throw new Error('当前预设正在切换或尚未恢复，请稍后再打开角色');
+            if (enabled() && (hasProfile() && !nativeLoaded || applying || waitingPreset || synchronizingProxy || restoreFailed)) return null;
             const value = read();
             return value ? { ...value, ...(value.proxy ? { proxy: { ...value.proxy } } : {}) } : null;
         },
